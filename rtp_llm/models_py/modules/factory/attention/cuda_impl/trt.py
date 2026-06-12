@@ -17,6 +17,13 @@ from rtp_llm.ops.compute_ops import (
 )
 
 
+def _is_trt_fmha_arch_supported() -> bool:
+    if not torch.cuda.is_available():
+        return False
+    major, _ = torch.cuda.get_device_capability()
+    return major < 10
+
+
 class TRTMHAImpl(FMHAImplBase):
 
     def __init__(
@@ -47,6 +54,8 @@ class TRTMHAImpl(FMHAImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
+        if not _is_trt_fmha_arch_supported():
+            return False
         # Create temporary instance to check support
         fmha_impl = TRTAttnOp(attn_configs)
         return fmha_impl.support(attn_inputs)
@@ -150,6 +159,8 @@ class TRTPagedMHAImpl(FMHAImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
+        if not _is_trt_fmha_arch_supported():
+            return False
         # Create temporary instance to check support
         fmha_impl = TRTPagedAttnOp(attn_configs)
         return fmha_impl.support(attn_inputs)

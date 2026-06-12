@@ -391,7 +391,9 @@ py_library(
         'model_factory_register.py',
     ],
     deps = [
+        ":utils",
         "//rtp_llm/server:server",
+        "//rtp_llm/metrics:metrics",
         ":uvicorn",
         ":fastapi",
         ":psutil",

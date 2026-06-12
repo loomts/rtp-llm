@@ -2,7 +2,7 @@ import gc
 import logging
 import threading
 import time
-from typing import Any, Dict, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, Optional, Union
 
 from pydantic import BaseModel
 
@@ -18,14 +18,22 @@ from rtp_llm.models_py.distributed.collective_torch import init_distributed_envi
 from rtp_llm.utils.concurrency_controller import get_global_controller
 from rtp_llm.utils.fuser import _nfs_manager
 
+if TYPE_CHECKING:
+    from rtp_llm.utils.jit_cache_manager import JitCacheManager
+
 StreamObjectType = Union[Dict[str, Any], BaseModel]
 
 USAGE_HEADER = "USAGE"
 
 
 class BackendManager(object):
-    def __init__(self, py_env_configs: PyEnvConfigs):
+    def __init__(
+        self,
+        py_env_configs: PyEnvConfigs,
+        jit_cache_manager: Optional["JitCacheManager"] = None,
+    ):
         self.py_env_configs = py_env_configs
+        self._jit_cache_manager = jit_cache_manager
         self._access_logger = AccessLogger(
             get_log_path(),
             py_env_configs.profiling_debug_logging_config.log_file_backup_count,
@@ -149,6 +157,8 @@ class BackendManager(object):
             "engine created successfully: self.engine.task_type=%s",
             self.engine.task_type,
         )
+        if self._jit_cache_manager is not None:
+            self._jit_cache_manager.start_background_sync()
 
     def serve_forever(self):
         """Enter service loop to keep the process alive until shutdown is requested"""
@@ -169,6 +179,8 @@ class BackendManager(object):
 
     def stop(self) -> None:
         """Stop the backend manager and cleanup resources"""
+        if self._jit_cache_manager is not None:
+            self._jit_cache_manager.stop()
         if isinstance(self.engine, BaseEngine):
             _nfs_manager.unmount_all()
             logging.info("all nfs paths unmounted")

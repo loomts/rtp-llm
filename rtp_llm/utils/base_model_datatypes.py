@@ -4,7 +4,7 @@ from typing import Any, Dict, List, NamedTuple, Optional
 import torch
 
 from rtp_llm.config.generate_config import GenerateConfig, RoleAddr
-from rtp_llm.utils.multimodal_util import MultimodalInput
+from rtp_llm.utils.multimodal_util import MMUrlType, MultimodalInput
 
 class EmbeddingOutput:
     text_embedding: torch.Tensor

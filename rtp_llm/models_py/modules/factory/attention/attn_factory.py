@@ -37,7 +37,13 @@ def get_mla_impl(
     mla_impls = PREFILL_MLA_IMPS if attn_inputs.is_prefill else DECODE_MLA_IMPS
     for impl in mla_impls:
         # Check support before creating instance
-        if not impl.support(attn_configs, attn_inputs):
+        impl_class_name = impl.__name__
+        try:
+            supported = impl.support(attn_configs, attn_inputs)
+        except Exception as e:
+            logging.warning("Failed to check support for %s: %s", impl_class_name, e)
+            continue
+        if not supported:
             continue
 
         cos_sin_cache = weight.get_global_weight_or_none(W.rope_cos_sin_cache)

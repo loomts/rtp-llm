@@ -29,6 +29,14 @@ def has_internal_source() -> bool:
     Returns:
         bool: 如果 internal_source 目录存在则返回 True，否则返回 False
     """
+    if os.environ.get("RTP_LLM_DISABLE_INTERNAL_SOURCE", "").lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        return False
+
     current_dir = os.path.dirname(os.path.abspath(__file__))  # rtp_llm/utils/
     rtp_llm_dir = os.path.dirname(current_dir)               # rtp_llm/
     project_root = os.path.dirname(rtp_llm_dir)              # workspace root

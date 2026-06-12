@@ -40,12 +40,9 @@ def local_rank_start(
 ):
     """Start local rank with proper signal handling for graceful shutdown"""
     backend_manager = None
+    jit_cache_manager = None
     logging.info(f"[PROCESS_START]Start local rank process")
-    start_time = time.time()
-    from rtp_llm.server.backend_manager import BackendManager
     from rtp_llm.utils.util import copy_gemm_config
-
-    logging.info(f"import BackendManager took {time.time()- start_time:.2f}s")
 
     def signal_handler(signum, frame):
         logging.info(
@@ -77,7 +74,21 @@ def local_rank_start(
         if py_env_configs.parallelism_config.world_size > 1:
             setproctitle(f"rtp_llm_rank-{local_rank}")
         set_global_controller(global_controller)
-        backend_manager = BackendManager(py_env_configs)
+        if py_env_configs.parallelism_config.world_rank == 0:
+            from rtp_llm.metrics import kmonitor
+
+            kmonitor.init()
+        from rtp_llm.utils.jit_cache_manager import JitCacheManager
+
+        jit_cache_manager = JitCacheManager(py_env_configs.jit_config)
+        jit_cache_manager.bootstrap_env()
+        jit_cache_manager.prepare(local_rank)
+
+        start_time = time.time()
+        from rtp_llm.server.backend_manager import BackendManager
+
+        logging.info(f"import BackendManager took {time.time()- start_time:.2f}s")
+        backend_manager = BackendManager(py_env_configs, jit_cache_manager)
         backend_manager.start()
         logging.info("Backend server initialized successfully, sending ready status")
 
@@ -87,7 +98,10 @@ def local_rank_start(
                 pipe_writer.send(
                     {
                         "status": "success",
-                        "message": f"Backend server started successfully on rank {py_env_configs.parallelism_config.local_rank}",
+                        "message": (
+                            "Backend server started successfully on rank "
+                            f"{py_env_configs.parallelism_config.local_rank}"
+                        ),
                     }
                 )
                 pipe_writer.close()
@@ -112,6 +126,11 @@ def local_rank_start(
                 pipe_writer.close()
             except Exception as pipe_error:
                 logging.warning(f"Failed to send error status via pipe: {pipe_error}")
+        if jit_cache_manager is not None:
+            try:
+                jit_cache_manager.sync_once("exception_sync")
+            except Exception:
+                logging.exception("best-effort JIT cache sync on exception failed")
         raise e
 
 

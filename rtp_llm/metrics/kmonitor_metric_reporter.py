@@ -28,6 +28,9 @@ class AccMetrics(Enum):
     IGRAPH_ERROR_QPS_METRIC = "py_rtp_igraph_error_qps"
     IGRAPH_EMPTY_QPS_METRIC = "py_rtp_igraph_empty_qps"
 
+    # jit cache
+    JIT_CACHE_ERROR_QPS_METRIC = "py_rtp_jit_cache_error_qps"
+
 
 class GaugeMetrics(Enum):
     RESPONSE_FIRST_TOKEN_RT_METRIC = "py_rtp_response_first_token_rt"
@@ -61,6 +64,11 @@ class GaugeMetrics(Enum):
 
     # vit preprocess
     VIT_PREPROCESS_RT_METRIC = "py_rtp_vit_preprocess_rt"
+
+    JIT_CACHE_PREPARE_RT_METRIC = "py_rtp_jit_cache_prepare_rt"
+    JIT_CACHE_SYNC_RT_METRIC = "py_rtp_jit_cache_sync_rt"
+    JIT_CACHE_FILE_COUNT_METRIC = "py_rtp_jit_cache_file_count"
+    JIT_CACHE_BYTES_METRIC = "py_rtp_jit_cache_bytes"
 
 
 class MetricReporter(object):
