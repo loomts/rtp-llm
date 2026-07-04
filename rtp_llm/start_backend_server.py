@@ -21,12 +21,13 @@ from rtp_llm.config.server_config_setup import (
     set_parallelism_config,
     setup_cuda_device_and_accl_env,
 )
+from rtp_llm.server.backend_manager import BackendManager
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
     set_global_controller,
 )
-from rtp_llm.utils.jit_cache_manager import JitCacheManager
 from rtp_llm.utils.process_manager import ProcessManager
+from rtp_llm.utils.util import copy_gemm_config
 
 setup_logging()
 
@@ -36,13 +37,13 @@ def local_rank_start(
     py_env_configs: PyEnvConfigs,
     world_rank: int = 0,
     pipe_writer=None,
+    jit_ready_event=None,
 ):
     """Start local rank with proper signal handling for graceful shutdown"""
     backend_manager = None
     jit_cache_manager = None
     shutdown_requested = threading.Event()
     logging.info(f"[PROCESS_START]Start local rank process")
-    from rtp_llm.utils.util import copy_gemm_config
 
     def signal_handler(signum, frame):
         logging.info(
@@ -78,18 +79,21 @@ def local_rank_start(
         if py_env_configs.parallelism_config.world_size > 1:
             setproctitle(f"rtp_llm_rank-{local_rank}")
         set_global_controller(global_controller)
-        jit_cache_manager = JitCacheManager(py_env_configs.jit_config)
-        jit_cache_manager.bootstrap()
-        if shutdown_requested.is_set():
-            raise KeyboardInterrupt("shutdown requested before JIT prepare")
-        jit_cache_manager.prepare(should_stop=shutdown_requested.is_set)
-        if shutdown_requested.is_set():
-            raise KeyboardInterrupt("shutdown requested after JIT prepare")
-        jit_cache_manager.start_background_sync()
-        start_time = time.time()
-        from rtp_llm.server.backend_manager import BackendManager
+        if local_rank == 0:
+            from rtp_llm.utils.jit_cache_manager import JitCacheManager
 
-        logging.info(f"import BackendManager took {time.time()- start_time:.2f}s")
+            jit_cache_manager = JitCacheManager(py_env_configs.jit_config)
+            jit_cache_manager.bootstrap()
+            if shutdown_requested.is_set():
+                raise KeyboardInterrupt("shutdown requested before JIT prepare")
+            jit_cache_manager.prepare()
+            if shutdown_requested.is_set():
+                raise KeyboardInterrupt("shutdown requested after JIT prepare")
+            jit_cache_manager.start_background_sync()
+            if jit_ready_event is not None:
+                jit_ready_event.set()
+        elif jit_ready_event is not None:
+            jit_ready_event.wait()
         backend_manager = BackendManager(py_env_configs)
         backend_manager.start()
         # Engine startup overwrites SIGTERM/SIGINT; restore Python handlers
@@ -182,6 +186,7 @@ def _create_rank_processes(
 
     processes = []
     rank_pipe_readers = []  # Store pipe readers for each rank
+    jit_ready_event = multiprocessing.Event() if local_world_size > 1 else None
 
     for world_rank in range(pc.world_rank, pc.world_rank + local_world_size):
         reader, writer = multiprocessing.Pipe(duplex=False)
@@ -195,6 +200,7 @@ def _create_rank_processes(
                 py_env_configs,
                 world_rank,
                 writer,
+                jit_ready_event,
             ),
             name=f"rank-{world_rank}",
         )

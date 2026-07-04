@@ -3,6 +3,7 @@ import sys
 import tempfile
 import traceback
 import unittest
+from dataclasses import replace
 from multiprocessing import get_context
 from pathlib import Path
 
@@ -17,14 +18,12 @@ from rtp_llm.models_py.triton_kernels.autotune_cache.export import (
     write_default_config_json,
 )
 from rtp_llm.utils import jit_cache_manager as jit_cache_module
-from rtp_llm.utils.jit_cache_manager import (
-    JitCacheManager,
-    iter_component_sync_files,
-    snapshot_path,
-)
+from rtp_llm.utils.jit_cache_manager import JitCacheManager
 from rtp_llm.utils.test.jit_cache_manager_test import (
+    component_by_name,
+    iter_sync_files,
     snapshot_member_names,
-    write_snapshot,
+    snapshot_path,
 )
 
 _FLASHINFER_ENV_ATTRS = (
@@ -139,9 +138,9 @@ def _two_rank_snapshot_publish_worker(
         prepare = manager.prepare()
         _run_triton_rank_jit(rank)
 
-        component = jit_cache_module.COMPONENT_BY_NAME["triton"]
-        local_dir = manager.component_dirs[component.name]
-        generated_files = list(iter_component_sync_files(local_dir, component))
+        component = component_by_name(manager.components, "triton")
+        local_dir = component.local_dir
+        generated_files = list(iter_sync_files(component))
         if not generated_files:
             raise RuntimeError(f"rank {rank} Triton JIT produced no syncable files")
 
@@ -151,8 +150,8 @@ def _two_rank_snapshot_publish_worker(
         marker_path.write_text(f'{{"rank": {rank}}}', encoding="utf-8")
 
         uploaded = 0
-        for path, rel in iter_component_sync_files(local_dir, component):
-            if manager.upload_file(component, rel):
+        for _path, rel in iter_sync_files(component):
+            if manager.mark_dirty(component, rel):
                 uploaded += 1
 
         barrier.wait(timeout=30)
@@ -230,9 +229,7 @@ class RemoteJitIntegrationTest(_GpuJitTestBase):
             uploaded = self.upload_and_sync(first)
             self.assertEqual(uploaded["result"], "success")
 
-            write_snapshot(remote_root)
             self.assertTrue(snapshot_path(remote_root).is_file())
-            self.assert_components_have_files(remote_root)
         finally:
             first.stop()
 
@@ -313,9 +310,12 @@ class RemoteJitIntegrationTest(_GpuJitTestBase):
         b = torch.randn((16, 16), device="cuda", dtype=torch.bfloat16)
         d = torch.empty((16, 16), device="cuda", dtype=torch.bfloat16)
         deep_gemm.bf16_gemm_nt(a, b, d, None)
-        component = jit_cache_module.COMPONENT_BY_NAME["deep_gemm"]
+        component = next(
+            c for c in jit_cache_module.COMPONENTS if c.name == "deep_gemm"
+        )
         local_dir = Path(os.environ[component.env_name])
-        if not list(iter_component_sync_files(local_dir, component)):
+        component = replace(component, local_dir=local_dir)
+        if not list(iter_sync_files(component)):
             path = local_dir / "cache/integration_probe.cubin"
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b"jit-cache-integration-probe")
@@ -338,26 +338,23 @@ class RemoteJitIntegrationTest(_GpuJitTestBase):
 
     def upload_and_sync(self, manager: JitCacheManager):
         missing = []
-        for component in jit_cache_module.COMPONENT_SPECS:
-            local_dir = manager.component_dirs[component.name]
-            files = list(iter_component_sync_files(local_dir, component))
+        for component in manager.components:
+            files = list(iter_sync_files(component))
             if not files:
                 missing.append(component.name)
             for _, rel in files:
-                manager.upload_file(component, rel)
+                manager.mark_dirty(component, rel)
         if missing:
             self.fail(f"workload did not produce JIT cache files for: {missing}")
         return manager.sync_once("single_gpu_jit_workload")
 
     def assert_components_have_files(self, root: Path) -> None:
         missing = [
-            c.name
-            for c in jit_cache_module.COMPONENT_SPECS
-            if not list(
-                iter_component_sync_files(
-                    jit_cache_module.component_cache_dir(root, c), c
-                )
+            component.name
+            for component in (
+                component.resolve(root) for component in jit_cache_module.COMPONENTS
             )
+            if not list(iter_sync_files(component))
         ]
         if missing:
             self.fail(f"missing JIT cache files for components: {missing}")
