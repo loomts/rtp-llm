@@ -41,7 +41,6 @@ from rtp_llm.models_py.triton_kernels.autotune_cache.cache import (
     get_config_dir,
     get_gpu_info,
     load_cached_default_config,
-    sanitize_gpu_name,
 )
 from rtp_llm.models_py.triton_kernels.autotune_cache.decorator import (
     cuda_cached_autotune,
@@ -58,5 +57,4 @@ __all__ = [
     "get_config_dir",
     "get_gpu_info",
     "load_cached_default_config",
-    "sanitize_gpu_name",
 ]

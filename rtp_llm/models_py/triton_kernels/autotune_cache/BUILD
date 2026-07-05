@@ -7,5 +7,8 @@ py_library(
         "export.py",
     ],
     data = glob(["configs/**/*.json"]),
+    deps = [
+        "//rtp_llm:gpu_info",
+    ],
     visibility = ["//visibility:public"],
 )

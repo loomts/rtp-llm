@@ -31,6 +31,10 @@ from rtp_llm.utils.util import copy_gemm_config
 
 setup_logging()
 
+# Upper bound for followers waiting on rank0's best-effort JIT setup, so a
+# rank0 that dies before signaling cannot hang them forever.
+JIT_READY_WAIT_TIMEOUT_S = 600.0
+
 
 def local_rank_start(
     global_controller: ConcurrencyController,
@@ -80,24 +84,40 @@ def local_rank_start(
             setproctitle(f"rtp_llm_rank-{local_rank}")
         set_global_controller(global_controller)
         if local_rank == 0:
-            from rtp_llm.utils.jit_cache_manager import JitCacheManager
+            # Best-effort: JIT setup must never fail startup; always release followers.
+            try:
+                from rtp_llm.utils.jit_cache_manager import JitCacheManager
 
-            jit_cache_manager = JitCacheManager(py_env_configs.jit_config)
-            jit_cache_manager.bootstrap()
-            if shutdown_requested.is_set():
-                raise KeyboardInterrupt("shutdown requested before JIT prepare")
-            jit_cache_manager.prepare()
-            if shutdown_requested.is_set():
-                raise KeyboardInterrupt("shutdown requested after JIT prepare")
-            jit_cache_manager.start_background_sync()
+                jit_cache_manager = JitCacheManager(py_env_configs.jit_config)
+                jit_cache_manager.bootstrap()
+                if not shutdown_requested.is_set():
+                    jit_cache_manager.prepare()
+                if not shutdown_requested.is_set():
+                    jit_cache_manager.start_background_sync()
+            except Exception:
+                logging.exception(
+                    "JIT cache setup failed; continuing without JIT cache"
+                )
+            finally:
+                if jit_ready_event is not None:
+                    jit_ready_event.set()
+        else:
+            # Non-rank-0 ranks don't manage the remote cache (rank 0 owns that),
+            # but must still point JIT env vars at the configured local dir.
+            try:
+                from rtp_llm.utils.jit_cache_manager import apply_jit_cache_env
+
+                apply_jit_cache_env(py_env_configs.jit_config.local_jit_dir)
+            except Exception:
+                logging.exception(
+                    "JIT cache env setup failed on follower rank; continuing"
+                )
             if jit_ready_event is not None:
-                jit_ready_event.set()
-        elif jit_ready_event is not None:
-            jit_ready_event.wait()
+                jit_ready_event.wait(timeout=JIT_READY_WAIT_TIMEOUT_S)
         backend_manager = BackendManager(py_env_configs)
         backend_manager.start()
         # Engine startup overwrites SIGTERM/SIGINT; restore Python handlers
-        # so the finally block can flush JIT artifacts on shutdown.
+        # so the finally block can stop local JIT background resources.
         install_signal_handlers()
         logging.info("Backend server initialized successfully, sending ready status")
 
@@ -178,7 +198,7 @@ def _create_rank_processes(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
 ):
-    """Create and start rank processes, returns (processes, rank_pipe_readers)"""
+    """Create and start rank processes, returns process handles and IPC resources."""
     pc = py_env_configs.parallelism_config
     local_world_size = _get_local_world_size(py_env_configs)
     cuda_device_list = _get_cuda_device_list()

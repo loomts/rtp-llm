@@ -25,15 +25,15 @@ import inspect
 import json
 import logging
 import os
-import re
 from functools import cache, lru_cache
 from pathlib import Path
 from typing import Any
 
-import torch
 import triton
 from packaging import version
 from triton.runtime.autotuner import Autotuner
+
+from rtp_llm.utils.gpu_info import get_gpu_info
 
 TRITON_ABOVE_3_5_1 = version.parse(triton.__version__) >= version.parse("3.5.1")
 
@@ -92,29 +92,6 @@ class CacheMode(enum.Enum):
 @lru_cache(maxsize=1)
 def _get_cache_mode() -> CacheMode:
     return CacheMode.from_env()
-
-
-def sanitize_gpu_name(gpu_name: str) -> str:
-    sanitized = re.sub(r"[^0-9A-Za-z]+", "_", gpu_name)
-    sanitized = sanitized.strip("_")
-    return sanitized or "unknown_gpu"
-
-
-@lru_cache(maxsize=1)
-def get_gpu_info() -> str:
-    """Get GPU model identifier (sanitized).
-
-    Priority: TRITON_AUTOTUNE_GPU_NAME env var > torch.cuda. CUDA-only —
-    other backends are not in scope for this cache. Falls back to "unknown"
-    so the module still imports on a host without a usable GPU (tests, dev
-    machines); the kernel-side decorator no-ops in that case.
-    """
-    gpu_name = os.environ.get("TRITON_AUTOTUNE_GPU_NAME")
-    if gpu_name is None and torch.cuda.is_available():
-        gpu_name = torch.cuda.get_device_name(0)
-    if gpu_name:
-        return sanitize_gpu_name(gpu_name)
-    return "unknown"
 
 
 def get_config_dir() -> Path:

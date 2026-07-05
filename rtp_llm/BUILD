@@ -129,7 +129,6 @@ requirement([
     "aiter",
     "fastsafetensors",
     "pybind11_stubgen",
-    "filelock",
     "watchdog",
     "zstandard",
 ] + deep + flashinfer_with_cache + flashmla + rtp_kernel + flashattn)
@@ -142,16 +141,30 @@ py_library(
     visibility = ["//visibility:public"],
 )
 
+# Lightweight GPU-id helper shared by the Triton autotune cache and the JIT
+# cache manager. Kept as its own target (no torch dep) so autotune_cache does
+# not have to pull in the heavy :utils library, and so rtp_llm.__init__ stays
+# cheap to import.
+py_library(
+    name = "gpu_info",
+    srcs = [
+        "utils/gpu_info.py",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 py_library(
     name = "utils",
     srcs = glob([
         "utils/**/*.py",
     ], exclude = [
+        "utils/gpu_info.py",
         "utils/jit_cache_manager.py",
         "utils/test/*.py",
         "utils/test/**/*.py",
     ]),
     deps = [
+        ":gpu_info",
         ":torch",
         ":safetensors",
         #":decord",
@@ -170,7 +183,7 @@ py_library(
     ],
     deps = [
         ":config_ops",
-        ":filelock",
+        ":gpu_info",
         ":utils",
         ":watchdog",
         ":zstandard",
@@ -591,7 +604,6 @@ py_package(
 )
 
 whl_reqs = [
-    "filelock>=3.20.0",
     "jinja2",
     "sympy",
     "typing-extensions",

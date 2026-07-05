@@ -397,7 +397,7 @@ class MasterConfig:
 
 class JITConfig:
     def __init__(self):
-        self.local_jit_dir: str = os.environ.get("LOCAL_JIT_DIR", "./.jit_cache")
+        self.local_jit_dir: str = "./.jit_cache"
         self.remote_jit_dir: str = ""
 
     def to_string(self):

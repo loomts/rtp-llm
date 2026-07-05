@@ -4,6 +4,14 @@ def init_jit_group_args(parser, jit_config):
     ##############################################################################################################
     jit_group = parser.add_argument_group("JIT Configuration")
     jit_group.add_argument(
+        "--local_jit_dir",
+        env_name="LOCAL_JIT_DIR",
+        bind_to=(jit_config, "local_jit_dir"),
+        type=str,
+        default="./.jit_cache",
+        help="JIT本地cache目录，存放各组件（flashinfer/deep_gemm/torch/triton等）的编译产物",
+    )
+    jit_group.add_argument(
         "--remote_jit_dir",
         env_name="REMOTE_JIT_DIR",
         bind_to=(jit_config, "remote_jit_dir"),

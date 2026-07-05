@@ -21,9 +21,8 @@ from rtp_llm.utils import jit_cache_manager as jit_cache_module
 from rtp_llm.utils.jit_cache_manager import JitCacheManager
 from rtp_llm.utils.test.jit_cache_manager_test import (
     component_by_name,
+    effective_member_names,
     iter_sync_files,
-    snapshot_member_names,
-    snapshot_path,
 )
 
 _FLASHINFER_ENV_ATTRS = (
@@ -42,7 +41,6 @@ _JIT_ENV_NAMES = (
     "DG_JIT_CACHE_DIR",
     "TORCH_EXTENSIONS_DIR",
     "REMOTE_JIT_DIR",
-    "LOCAL_JIT_DIR",
 )
 
 
@@ -135,7 +133,7 @@ def _two_rank_snapshot_publish_worker(
             root_path / f"local_rank_{rank}",
             remote_path,
         )
-        prepare = manager.prepare()
+        manager.prepare()
         _run_triton_rank_jit(rank)
 
         component = component_by_name(manager.components, "triton")
@@ -155,13 +153,11 @@ def _two_rank_snapshot_publish_worker(
                 uploaded += 1
 
         barrier.wait(timeout=30)
-        summary = manager.sync_once(f"rank_{rank}_publish")
+        manager._publish_delta()
 
         result_queue.put(
             {
                 "rank": rank,
-                "prepare": prepare,
-                "summary": summary,
                 "uploaded": uploaded,
                 "generated_files": len(generated_files),
                 "marker_member": f"triton/{marker_rel}",
@@ -222,14 +218,12 @@ class RemoteJitIntegrationTest(_GpuJitTestBase):
         remote_root = self.root / "remote"
         first = _make_jit_manager(self.root / "local_first", remote_root)
         try:
-            prepare = first.prepare()
-            self.assertEqual(prepare["cache_state"], "snapshot_miss")
+            first.prepare()
 
             self.run_all_jit_workloads()
-            uploaded = self.upload_and_sync(first)
-            self.assertEqual(uploaded["result"], "success")
+            self.upload_and_sync(first)
 
-            self.assertTrue(snapshot_path(remote_root).is_file())
+            self.assertTrue(first.store.restore(self.root / "restore_probe"))
         finally:
             first.stop()
 
@@ -240,9 +234,7 @@ class RemoteJitIntegrationTest(_GpuJitTestBase):
 
         second = _make_jit_manager(self.root / "local_second", remote_root)
         try:
-            prepare = second.prepare()
-            self.assertEqual(prepare["cache_state"], "snapshot_hit")
-            self.assertEqual(prepare["result"], "success")
+            second.prepare()
             self.assert_components_have_files(second.local_root)
         finally:
             second.stop()
@@ -346,7 +338,7 @@ class RemoteJitIntegrationTest(_GpuJitTestBase):
                 manager.mark_dirty(component, rel)
         if missing:
             self.fail(f"workload did not produce JIT cache files for: {missing}")
-        return manager.sync_once("single_gpu_jit_workload")
+        manager._publish_delta()
 
     def assert_components_have_files(self, root: Path) -> None:
         missing = [
@@ -418,14 +410,10 @@ class TwoRankSnapshotPublishTest(unittest.TestCase):
             self.fail("\n".join(e["error"] for e in errors))
 
         for result in results:
-            self.assertEqual(result["summary"]["result"], "success")
             self.assertGreater(result["generated_files"], 0)
             self.assertGreater(result["uploaded"], 0)
 
-        snapshot = snapshot_path(remote_root)
-        self.assertEqual(snapshot, remote_root / jit_cache_module.SNAPSHOT_NAME)
-        self.assertTrue(snapshot.is_file())
-        members = snapshot_member_names(snapshot)
+        members = effective_member_names(remote_root)
         for result in results:
             self.assertIn(result["marker_member"], members)
 
