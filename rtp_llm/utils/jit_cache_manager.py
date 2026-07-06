@@ -246,26 +246,27 @@ class RemoteSnapshotStore:
         with self.atomic_write(delta_archive) as tmp_archive:
             self.pack(local_delta_dir, tmp_archive)
 
-    def compact(self, work_dir: Path | None = None) -> None:
-        snapshot_archive = self.remote_root / SNAPSHOT_NAME
+    def compact(self, local_compact_dir: Path | None = None) -> None:
+        remote_full_snapshot = self.remote_root / SNAPSHOT_NAME
         with self.lock_remote() as locked:
             if not locked:
                 return
             delta_archives = self._delta_archives()
             if not delta_archives:
                 return
-            if work_dir is not None:
-                work_dir.mkdir(parents=True, exist_ok=True)
+            if local_compact_dir is not None:
+                local_compact_dir.mkdir(parents=True, exist_ok=True)
             with tempfile.TemporaryDirectory(
-                prefix=".jit_snapshot_", dir=work_dir
+                prefix=".jit_snapshot_", dir=local_compact_dir
             ) as tmp_name:
-                tmp_dir = Path(tmp_name)
+                local_tmp_dir = Path(tmp_name)
                 sources = (
-                    [snapshot_archive] if snapshot_archive.is_file() else []
+                    [remote_full_snapshot] if remote_full_snapshot.is_file() else []
                 ) + delta_archives
-                self._extract_all(sources, tmp_dir)
-                with self.atomic_write(snapshot_archive) as tmp_snapshot:
-                    self.pack(tmp_dir, tmp_snapshot)
+                # Merge locally (later delta wins) and repack, landing on fuse via one tmp.replace() rather than per-file renames.
+                self._extract_all(sources, local_tmp_dir)
+                with self.atomic_write(remote_full_snapshot) as remote_tmp_snapshot:
+                    self.pack(local_tmp_dir, remote_tmp_snapshot)
                 for delta_archive in delta_archives:
                     delta_archive.unlink(missing_ok=True)
 

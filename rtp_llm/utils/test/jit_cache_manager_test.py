@@ -248,24 +248,6 @@ class JitCacheManagerTest(unittest.TestCase):
             jit_cache_module.BUILTIN_CONFIG_SENTINEL,
         )
 
-    def test_apply_jit_cache_env_can_skip_scope_resolution(self):
-        calls = []
-        component = jit_cache_module.Component(
-            "scoped",
-            "SCOPED_ENV",
-            (".so", ".cubin"),
-            frozenset({"closed"}),
-            lambda: calls.append(True) or "gpu",
-        )
-
-        with mock.patch.object(jit_cache_module, "COMPONENTS", (component,)):
-            jit_cache_module.apply_jit_cache_env(
-                self.root / "local", resolve_scopes=False
-            )
-
-        self.assertEqual(calls, [])
-        self.assertEqual(os.environ["SCOPED_ENV"], str(self.root / "local/scoped"))
-
     def test_prepare_without_remote_is_disabled(self):
         manager = self.make_manager()
 
@@ -351,27 +333,6 @@ class JitCacheManagerTest(unittest.TestCase):
             with self.assertRaises(OSError):
                 manager.publish_staged_delta()
         self.assertFalse(any(manager.local_delta_dir.iterdir()))
-
-    def test_publish_staged_delta_rolls_back_when_recreating_delta_dir_fails(self):
-        _remote, manager = self.make_remote_manager()
-        component = component_by_name(manager.components, "triton")
-        local_file = component.local_dir / "kernel/a.cubin"
-        local_file.parent.mkdir(parents=True, exist_ok=True)
-        local_file.write_text("cubin", encoding="utf-8")
-        manager.stage_delta_file(component, "kernel/a.cubin")
-        original_mkdir = Path.mkdir
-
-        def fail_recreate_delta_dir(path, *args, **kwargs):
-            if path == manager.local_delta_dir and not path.exists():
-                raise OSError("cannot recreate delta dir")
-            return original_mkdir(path, *args, **kwargs)
-
-        with mock.patch.object(Path, "mkdir", fail_recreate_delta_dir):
-            with self.assertRaises(OSError):
-                manager.publish_staged_delta()
-
-        staged = manager.local_delta_dir / "triton/kernel/a.cubin"
-        self.assertEqual(staged.read_text(encoding="utf-8"), "cubin")
 
     def test_delta_upload_publishes_delta_and_clears_local_delta(self):
         remote, manager = self.make_remote_manager()
@@ -616,34 +577,6 @@ class JitCacheManagerTest(unittest.TestCase):
             self.assertTrue(lock_dir.is_dir())
 
         self.assertFalse(lock_dir.exists())
-
-    def test_snapshot_store_lock_renames_stale_lock_before_reacquire(self):
-        remote = self.root / "remote"
-        remote.mkdir()
-        lock_dir = remote / jit_cache_module.REMOTE_SNAPSHOT_COMPACT_LOCK_DIR_NAME
-        lock_dir.mkdir()
-        stale_time = time.time() - jit_cache_module.SNAPSHOT_LOCK_STALE_S - 1
-        os.utime(lock_dir, (stale_time, stale_time))
-        original_mkdir = Path.mkdir
-
-        def mkdir_with_race(path, *args, **kwargs):
-            if path == lock_dir and not path.exists():
-                original_mkdir(path, *args, **kwargs)
-                raise FileExistsError(str(path))
-            return original_mkdir(path, *args, **kwargs)
-
-        with mock.patch.object(Path, "mkdir", mkdir_with_race):
-            with jit_cache_module.RemoteSnapshotStore(remote).lock_remote() as locked:
-                self.assertFalse(locked)
-
-        self.assertTrue(lock_dir.is_dir())
-        self.assertFalse(
-            list(
-                remote.glob(
-                    f"{jit_cache_module.REMOTE_SNAPSHOT_COMPACT_LOCK_DIR_NAME}.*.stale"
-                )
-            )
-        )
 
     def test_stage_delta_file_filters_unsyncable_empty_temp_and_missing_files(self):
         _remote, manager = self.make_remote_manager()

@@ -28,10 +28,7 @@ py_library(
 
 py_binary(
     name = "gpu_lock",
-    deps = [
-        ":filelock",
-        ":torch",
-    ],
+    deps = [":filelock", ":torch"],
     main = "device_resource.py",
     srcs = [
         "device_resource.py",
