@@ -26,7 +26,7 @@ Public surface:
                                 `cache_results` kwarg in this Triton version.
 
 Environment variables:
-  TRITON_AUTOTUNE_CACHE_MODE     - "disabled" (default) | "cached"
+  TRITON_AUTOTUNE_CACHE_MODE     - "disabled" | "cached" (default)
   TRITON_AUTOTUNE_CONFIG_DIR     - override JSON root
   TRITON_AUTOTUNE_GPU_NAME       - override GPU model id used for path lookup
 """

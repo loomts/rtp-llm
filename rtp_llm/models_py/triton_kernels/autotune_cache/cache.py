@@ -14,7 +14,7 @@
 # installed as the winner.
 #
 # Environment variables:
-#   TRITON_AUTOTUNE_CACHE_MODE     - "disabled" | "cached"; default "disabled"
+#   TRITON_AUTOTUNE_CACHE_MODE     - "disabled" | "cached"; default "cached"
 #   TRITON_AUTOTUNE_CONFIG_DIR     - override JSON root; default <this_dir>/configs/{GPU}/.
 #                                    Set to BUILTIN_CONFIG_SENTINEL to use the default.
 #   TRITON_AUTOTUNE_GPU_NAME       - override GPU model id used for path lookup
@@ -66,11 +66,10 @@ BUILTIN_CONFIG_SENTINEL = "__builtin__"
 class CacheMode(enum.Enum):
     """How the cache loads kernel configs (TRITON_AUTOTUNE_CACHE_MODE env var).
 
-    DISABLED - skip all cache lookups, always fall back to Triton autotune
-               (default when the env var is unset).
+    DISABLED - skip all cache lookups, always fall back to Triton autotune.
     CACHED   - use the top-level `default_config` of the kernel JSON file.
                If the file is missing or has no default_config, fall back
-               to Triton autotune. CI default.
+               to Triton autotune. Default.
     """
 
     DISABLED = "disabled"
@@ -78,7 +77,7 @@ class CacheMode(enum.Enum):
 
     @classmethod
     def from_env(cls) -> "CacheMode":
-        mode_str = os.environ.get("TRITON_AUTOTUNE_CACHE_MODE", cls.DISABLED.value)
+        mode_str = os.environ.get("TRITON_AUTOTUNE_CACHE_MODE", cls.CACHED.value)
         try:
             return cls(mode_str)
         except ValueError:

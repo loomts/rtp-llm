@@ -132,7 +132,14 @@ def resolve_remote_root(remote_jit_dir: Any) -> Path | None:
 
         text = fetch_remote_file_to_local(text, MountRwMode.RWMODE_RW)
     path = Path(text).expanduser().absolute()
-    return path if path.is_dir() else None
+    if not path.is_dir():
+        logging.warning(
+            "JIT remote cache disabled: remote_jit_dir=%r resolved to %s which does not exist or is not a directory",
+            remote_jit_dir,
+            path,
+        )
+        return None
+    return path
 
 
 def apply_jit_cache_env(local_root: Path | str, resolve_scopes: bool = True) -> None:
@@ -143,7 +150,6 @@ def apply_jit_cache_env(local_root: Path | str, resolve_scopes: bool = True) -> 
         os.environ[component.env_name] = str(
             component.resolve(root, resolve_scopes).local_dir
         )
-    os.environ.setdefault("TRITON_AUTOTUNE_CACHE_MODE", "cached")
 
 
 def _new_delta_archive_name() -> str:
@@ -190,7 +196,7 @@ class RemoteSnapshotStore:
         try:
             yield tmp
             tmp.replace(path)
-        except:
+        except BaseException:
             with suppress(OSError):
                 tmp.unlink()
             raise

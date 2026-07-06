@@ -225,7 +225,7 @@ class JitCacheManagerTest(unittest.TestCase):
                 self.component_dir(self.root / "local", component.name),
             )
 
-    def test_apply_jit_cache_env_overwrites_component_envs(self):
+    def test_apply_jit_cache_env_overwrites_component_envs_by_default(self):
         custom_triton = self.root / "custom_triton"
         os.environ["TRITON_CACHE_DIR"] = str(custom_triton)
 
