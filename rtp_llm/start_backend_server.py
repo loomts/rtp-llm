@@ -34,6 +34,7 @@ setup_logging()
 # Upper bound for followers waiting on rank0's best-effort JIT setup, so a
 # rank0 that dies before signaling cannot hang them forever.
 JIT_READY_WAIT_TIMEOUT_S = 600.0
+JIT_READY_EVENT_HOLDERS = []
 
 
 def local_rank_start(
@@ -229,7 +230,9 @@ def _create_rank_processes(
         processes.append(proc)
         rank_pipe_readers.append(reader)
 
-    return processes, rank_pipe_readers
+    # Return the event so the parent keeps a reference: if it were GC'd here its
+    # semaphore would be unlinked before spawn children unpickle it
+    return processes, rank_pipe_readers, jit_ready_event
 
 
 def _wait_for_ranks_startup(
@@ -329,13 +332,16 @@ def multi_rank_start(
     except RuntimeError as e:
         logging.warning(str(e))
 
-    # Create processes and get pipe readers
-    processes, rank_pipe_readers = _create_rank_processes(
+    # Create processes and get pipe readers. Hold jit_ready_event until ranks have
+    # started so its semaphore is not unlinked before spawn children rebuild it.
+    processes, rank_pipe_readers, jit_ready_event = _create_rank_processes(
         global_controller, py_env_configs
     )
     local_world_size = len(processes)
 
     if py_env_configs.distribute_config.fake_gang_env:
+        if jit_ready_event is not None:
+            JIT_READY_EVENT_HOLDERS.append(jit_ready_event)
         return processes
 
     # Wait for all ranks to report startup status

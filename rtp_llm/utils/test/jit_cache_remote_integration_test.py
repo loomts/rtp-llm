@@ -34,13 +34,8 @@ _FLASHINFER_ENV_ATTRS = (
     "FLASHINFER_AOT_DIR",
 )
 
-_JIT_ENV_NAMES = (
-    "FLASHINFER_WORKSPACE_BASE",
-    "TRITON_CACHE_DIR",
-    "TRITON_AUTOTUNE_CONFIG_DIR",
-    "DG_JIT_CACHE_DIR",
-    "TORCH_EXTENSIONS_DIR",
-    "REMOTE_JIT_DIR",
+_JIT_ENV_NAMES = tuple(c.env_name for c in jit_cache_module.COMPONENTS) + (
+    "TRITON_AUTOTUNE_CACHE_MODE",
 )
 
 
@@ -149,11 +144,11 @@ def _two_rank_snapshot_publish_worker(
 
         uploaded = 0
         for _path, rel in iter_sync_files(component):
-            if manager.mark_dirty(component, rel):
-                uploaded += 1
+            manager.stage_delta_file(component, rel)
+            uploaded += 1
 
         barrier.wait(timeout=30)
-        manager._publish_delta()
+        manager.publish_staged_delta()
 
         result_queue.put(
             {
@@ -263,7 +258,7 @@ class RemoteJitIntegrationTest(_GpuJitTestBase):
         autotune_dir = Path(os.environ["TRITON_AUTOTUNE_CONFIG_DIR"])
         autotune_dir.mkdir(parents=True, exist_ok=True)
         write_default_config_json(
-            autotune_dir / "autotuned_add_kernel.json",
+            autotune_dir / "autotuned_add_kernel.autotune.json",
             "autotuned_add_kernel",
             {"kwargs": {"block": 128}, "num_warps": 4, "num_stages": 3},
         )
@@ -308,9 +303,10 @@ class RemoteJitIntegrationTest(_GpuJitTestBase):
         local_dir = Path(os.environ[component.env_name])
         component = replace(component, local_dir=local_dir)
         if not list(iter_sync_files(component)):
-            path = local_dir / "cache/integration_probe.cubin"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(b"jit-cache-integration-probe")
+            for name in ("kernel.cu", "kernel.cubin"):
+                path = local_dir / "cache" / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"jit-cache-integration-probe")
 
     def run_torch_extension_jit(self) -> None:
         from torch.utils.cpp_extension import load_inline
@@ -335,10 +331,10 @@ class RemoteJitIntegrationTest(_GpuJitTestBase):
             if not files:
                 missing.append(component.name)
             for _, rel in files:
-                manager.mark_dirty(component, rel)
+                manager.stage_delta_file(component, rel)
         if missing:
             self.fail(f"workload did not produce JIT cache files for: {missing}")
-        manager._publish_delta()
+        manager.publish_staged_delta()
 
     def assert_components_have_files(self, root: Path) -> None:
         missing = [
@@ -371,6 +367,9 @@ class TwoRankSnapshotPublishTest(unittest.TestCase):
             self.skipTest("CUDA is not available")
         if torch.cuda.device_count() < 2:
             self.skipTest("two CUDA devices are required for 2-rank concurrency")
+        cap = torch.cuda.get_device_capability(0)
+        if cap[0] < 9:
+            self.skipTest(f"SM90+ required for Triton JIT workload, got {cap}")
 
         world_size = 2
         remote_root = self.root / "remote_two_rank"

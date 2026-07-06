@@ -1,3 +1,4 @@
+import os
 import time
 
 from rtp_llm.utils.jit_cache_manager import apply_jit_cache_env
@@ -5,7 +6,9 @@ from rtp_llm.utils.jit_cache_manager import apply_jit_cache_env
 st = time.time()
 
 # Import predates arg parsing, so use the default dir; ranks re-apply the configured one.
-apply_jit_cache_env("./.jit_cache")
+apply_jit_cache_env(
+    os.environ.get("LOCAL_JIT_DIR", "./.jit_cache"), resolve_scopes=False
+)
 
 # load th_transformer.so
 # Import internal models to register them
