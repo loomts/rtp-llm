@@ -78,7 +78,7 @@ py_test(
         "jit_cache_remote_integration_test.py",
     ],
     args = [
-        "TwoRankSnapshotPublishTest.test_two_gpu_rank_processes_publish_single_snapshot_file",
+        "TwoRankDirectRemoteTest.test_two_gpu_rank_processes_share_remote_jit_dir",
     ],
     env = {
         "FLASHINFER_DISABLE_VERSION_CHECK": "1",

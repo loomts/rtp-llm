@@ -129,8 +129,6 @@ requirement([
     "aiter",
     "fastsafetensors",
     "pybind11_stubgen",
-    "watchdog",
-    "zstandard",
 ] + deep + flashinfer_with_cache + flashmla + rtp_kernel + flashattn)
 
 
@@ -185,8 +183,6 @@ py_library(
         ":config_ops",
         ":gpu_info",
         ":utils",
-        ":watchdog",
-        ":zstandard",
         "//rtp_llm/models_py/triton_kernels:autotune_cache",
     ],
     visibility = ["//visibility:public"],
@@ -642,8 +638,6 @@ whl_reqs = [
     "oss2",
     "orjson",
     "aiohttp",
-    "watchdog==6.0.0",
-    "zstandard==0.23.0",
     "json5",
     "dashscope>=1.11.0",
     "jieba",

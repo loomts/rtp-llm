@@ -97,10 +97,10 @@ def local_rank_start(
                 if jit_ready_event is not None:
                     jit_ready_event.set()
         elif jit_ready_event is not None:
-            from rtp_llm.utils.jit_cache_manager import apply_jit_cache_env
+            from rtp_llm.utils.jit_cache_manager import JitCacheManager
 
-            apply_jit_cache_env(py_env_configs.jit_config.local_jit_dir)
             jit_ready_event.wait(timeout=600.0)
+            JitCacheManager(py_env_configs.jit_config).bootstrap()
         backend_manager = BackendManager(py_env_configs)
         backend_manager.start()
         # Engine startup overwrites SIGTERM/SIGINT; restore Python handlers

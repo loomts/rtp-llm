@@ -103,7 +103,7 @@ def _run_triton_rank_jit(rank: int) -> None:
         raise AssertionError(f"rank {rank} Triton JIT result mismatch")
 
 
-def _two_rank_snapshot_publish_worker(
+def _two_rank_direct_remote_worker(
     rank: int,
     world_size: int,
     root: str,
@@ -142,18 +142,13 @@ def _two_rank_snapshot_publish_worker(
         marker_path.parent.mkdir(parents=True, exist_ok=True)
         marker_path.write_text(f'{{"rank": {rank}}}', encoding="utf-8")
 
-        uploaded = 0
-        for _path, rel in iter_sync_files(component):
-            manager.stage_delta_file(component, rel)
-            uploaded += 1
-
         barrier.wait(timeout=30)
-        manager.publish_staged_delta()
+        direct_files = len(list(iter_sync_files(component)))
 
         result_queue.put(
             {
                 "rank": rank,
-                "uploaded": uploaded,
+                "direct_files": direct_files,
                 "generated_files": len(generated_files),
                 "marker_member": f"triton/{marker_rel}",
             }
@@ -216,9 +211,7 @@ class RemoteJitIntegrationTest(_GpuJitTestBase):
             first.prepare()
 
             self.run_all_jit_workloads()
-            self.upload_and_sync(first)
-
-            self.assertTrue(first.store.restore(self.root / "restore_probe"))
+            self.assert_components_have_files(remote_root)
         finally:
             first.stop()
 
@@ -324,18 +317,6 @@ class RemoteJitIntegrationTest(_GpuJitTestBase):
         )
         self.assertEqual(module.add_one_int(41), 42)
 
-    def upload_and_sync(self, manager: JitCacheManager):
-        missing = []
-        for component in manager.components:
-            files = list(iter_sync_files(component))
-            if not files:
-                missing.append(component.name)
-            for _, rel in files:
-                manager.stage_delta_file(component, rel)
-        if missing:
-            self.fail(f"workload did not produce JIT cache files for: {missing}")
-        manager.publish_staged_delta()
-
     def assert_components_have_files(self, root: Path) -> None:
         missing = [
             component.name
@@ -348,7 +329,7 @@ class RemoteJitIntegrationTest(_GpuJitTestBase):
             self.fail(f"missing JIT cache files for components: {missing}")
 
 
-class TwoRankSnapshotPublishTest(unittest.TestCase):
+class TwoRankDirectRemoteTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
@@ -362,7 +343,7 @@ class TwoRankSnapshotPublishTest(unittest.TestCase):
         jit_cache_module.get_gpu_info.cache_clear()
         self.tmp.cleanup()
 
-    def test_two_gpu_rank_processes_publish_single_snapshot_file(self):
+    def test_two_gpu_rank_processes_share_remote_jit_dir(self):
         if not torch.cuda.is_available():
             self.skipTest("CUDA is not available")
         if torch.cuda.device_count() < 2:
@@ -378,7 +359,7 @@ class TwoRankSnapshotPublishTest(unittest.TestCase):
         result_queue = ctx.Queue()
         processes = [
             ctx.Process(
-                target=_two_rank_snapshot_publish_worker,
+                target=_two_rank_direct_remote_worker,
                 args=(
                     rank,
                     world_size,
@@ -410,7 +391,7 @@ class TwoRankSnapshotPublishTest(unittest.TestCase):
 
         for result in results:
             self.assertGreater(result["generated_files"], 0)
-            self.assertGreater(result["uploaded"], 0)
+            self.assertGreater(result["direct_files"], 0)
 
         members = effective_member_names(remote_root)
         for result in results:
