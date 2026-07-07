@@ -3,6 +3,7 @@ import json
 import logging
 import threading
 import time
+from dataclasses import asdict, is_dataclass
 from typing import Any, Callable, Dict, Union
 
 from fastapi import Request
@@ -59,10 +60,65 @@ class FrontendServer(object):
         self._embedding_endpoint = None
         self.is_embedding = False
         self.thread_lock_ = threading.Lock()
+        self._request_perf_index = 0
         self._global_controller = get_global_controller()
         self.rank_id = str(rank_id)
         self.server_id = str(server_id)
         kmonitor.init()
+
+    def _next_request_perf_index(self) -> int:
+        with self.thread_lock_:
+            self._request_perf_index += 1
+            return self._request_perf_index
+
+    @staticmethod
+    def _safe_get(obj: Any, name: str, default: Any = None) -> Any:
+        if obj is None:
+            return default
+        if isinstance(obj, dict):
+            return obj.get(name, default)
+        return getattr(obj, name, default)
+
+    @staticmethod
+    def _safe_to_dict(obj: Any) -> Dict[str, Any]:
+        if obj is None:
+            return {}
+        if isinstance(obj, dict):
+            return obj
+        if isinstance(obj, BaseModel):
+            return obj.model_dump(exclude_none=True)
+        if is_dataclass(obj):
+            return asdict(obj)
+        if hasattr(obj, "__dict__"):
+            return dict(obj.__dict__)
+        return {}
+
+    @classmethod
+    def _response_aux_info(cls, response: Any) -> Dict[str, Any]:
+        return cls._safe_to_dict(cls._safe_get(response, "aux_info"))
+
+    @classmethod
+    def _response_usage_info(cls, response: Any) -> Dict[str, Any]:
+        return cls._safe_to_dict(cls._safe_get(response, "usage"))
+
+    @staticmethod
+    def _request_shape(req: Dict[Any, Any]) -> str:
+        generate_config = req.get("generate_config", {})
+        if not isinstance(generate_config, dict):
+            generate_config = {}
+        prompt = req.get("prompt", "")
+        messages = req.get("messages", [])
+        return (
+            f"kind={'openai' if ChatCompletionRequest.is_openai_request(req) else 'raw'},"
+            f"stream={req.get('stream', False)},"
+            f"source={req.get('source', 'unknown')},"
+            f"prompt_chars={len(prompt) if isinstance(prompt, str) else 0},"
+            f"messages_count={len(messages) if isinstance(messages, list) else 0},"
+            f"max_tokens={req.get('max_tokens', '')},"
+            f"max_completion_tokens={req.get('max_completion_tokens', '')},"
+            f"max_new_tokens={generate_config.get('max_new_tokens', '')},"
+            f"private_request={req.get('private_request', False)}"
+        )
 
     def start(self):
         if (
@@ -394,60 +450,111 @@ class FrontendServer(object):
         return rep
 
     async def _call_generate_with_report(
-        self, generate_call: Callable[[], CompleteResponseAsyncGenerator]
+        self,
+        req: Dict[Any, Any],
+        request_perf_index: int,
+        generate_call: Callable[[], CompleteResponseAsyncGenerator],
     ):
         async def __gen_response_with_report(start_time: float, response_generator):
             last_iterate_time = current_time_ms()
             first_token = True
             iter_count = 0
-            async for response in response_generator:
-                end_time = current_time_ms()
-                if first_token:
-                    first_token = False
-                    kmonitor.report(
-                        GaugeMetrics.RESPONSE_FIRST_TOKEN_RT_METRIC,
-                        end_time - last_iterate_time,
-                    )
-                else:
-                    step_output_len = 1
-                    if hasattr(response, "aux_info"):
-                        if isinstance(response.aux_info, list):
-                            step_output_len = 0
-                            for info in response.aux_info:
-                                step_output_len += info.get("step_output_len", 1)
-                        elif isinstance(response.aux_info, dict):
-                            step_output_len = max(
-                                response.aux_info.get("step_output_len", 1),
-                                step_output_len,
-                            )
+            first_token_rt_ms = None
+            last_aux_info: Dict[str, Any] = {}
+            last_usage_info: Dict[str, Any] = {}
+            completed = False
+            try:
+                async for response in response_generator:
+                    end_time = current_time_ms()
+                    aux_info = self._response_aux_info(response)
+                    usage_info = self._response_usage_info(response)
+                    if aux_info:
+                        last_aux_info = aux_info
+                    if usage_info:
+                        last_usage_info = usage_info
+                    if first_token:
+                        first_token = False
+                        first_token_rt_ms = end_time - start_time
+                        kmonitor.report(
+                            GaugeMetrics.RESPONSE_FIRST_TOKEN_RT_METRIC,
+                            end_time - last_iterate_time,
+                        )
+                        logging.info(
+                            "Request first token timing: request_index=%s request_id=%s rank_id=%s server_id=%s first_token_rt_ms=%.2f shape=[%s]",
+                            request_perf_index,
+                            req.get(request_id_field_name, ""),
+                            self.rank_id,
+                            self.server_id,
+                            first_token_rt_ms,
+                            self._request_shape(req),
+                        )
+                    else:
+                        step_output_len = 1
+                        if hasattr(response, "aux_info"):
+                            if isinstance(response.aux_info, list):
+                                step_output_len = 0
+                                for info in response.aux_info:
+                                    step_output_len += info.get("step_output_len", 1)
+                            elif isinstance(response.aux_info, dict):
+                                step_output_len = max(
+                                    response.aux_info.get("step_output_len", 1),
+                                    step_output_len,
+                                )
 
+                        kmonitor.report(
+                            GaugeMetrics.RESPONSE_ITER_RT_METRIC,
+                            (end_time - last_iterate_time) / step_output_len,
+                        )
                     kmonitor.report(
-                        GaugeMetrics.RESPONSE_ITER_RT_METRIC,
-                        (end_time - last_iterate_time) / step_output_len,
+                        AccMetrics.ITER_QPS_METRIC,
+                        1,
+                        {
+                            "rank_id": self.rank_id,
+                            "server_id": self.server_id,
+                        },
                     )
-                kmonitor.report(
-                    AccMetrics.ITER_QPS_METRIC,
-                    1,
-                    {
-                        "rank_id": self.rank_id,
-                        "server_id": self.server_id,
-                    },
+                    last_iterate_time = end_time
+                    iter_count += 1
+                    yield response
+                completed = True
+            finally:
+                e2e_ms = current_time_ms() - start_time
+                kmonitor.report(GaugeMetrics.RESPONSE_ITERATE_COUNT, iter_count)
+                kmonitor.report(GaugeMetrics.LANTENCY_METRIC, e2e_ms)
+                if completed:
+                    kmonitor.report(
+                        AccMetrics.SUCCESS_QPS_METRIC,
+                        1,
+                        {
+                            "rank_id": self.rank_id,
+                            "server_id": self.server_id,
+                        },
+                    )
+                logging.info(
+                    "Request performance summary: request_index=%s request_id=%s rank_id=%s server_id=%s completed=%s iter_count=%s first_token_rt_ms=%s e2e_ms=%.2f input_len=%s output_len=%s step_output_len=%s reuse_len=%s local_reuse_len=%s remote_reuse_len=%s memory_reuse_len=%s wait_time=%s aux_cost_time=%s aux_first_token_cost_time=%s usage_prompt_tokens=%s usage_completion_tokens=%s usage_total_tokens=%s shape=[%s]",
+                    request_perf_index,
+                    req.get(request_id_field_name, ""),
+                    self.rank_id,
+                    self.server_id,
+                    completed,
+                    iter_count,
+                    f"{first_token_rt_ms:.2f}" if first_token_rt_ms is not None else "",
+                    e2e_ms,
+                    last_aux_info.get("input_len", ""),
+                    last_aux_info.get("output_len", ""),
+                    last_aux_info.get("step_output_len", ""),
+                    last_aux_info.get("reuse_len", ""),
+                    last_aux_info.get("local_reuse_len", ""),
+                    last_aux_info.get("remote_reuse_len", ""),
+                    last_aux_info.get("memory_reuse_len", ""),
+                    last_aux_info.get("wait_time", ""),
+                    last_aux_info.get("cost_time", ""),
+                    last_aux_info.get("first_token_cost_time", ""),
+                    last_usage_info.get("prompt_tokens", ""),
+                    last_usage_info.get("completion_tokens", ""),
+                    last_usage_info.get("total_tokens", ""),
+                    self._request_shape(req),
                 )
-                last_iterate_time = end_time
-                iter_count += 1
-                yield response
-            kmonitor.report(GaugeMetrics.RESPONSE_ITERATE_COUNT, iter_count)
-            kmonitor.report(
-                GaugeMetrics.LANTENCY_METRIC, current_time_ms() - start_time
-            )
-            kmonitor.report(
-                AccMetrics.SUCCESS_QPS_METRIC,
-                1,
-                {
-                    "rank_id": self.rank_id,
-                    "server_id": self.server_id,
-                },
-            )
 
         assert self._frontend_worker is not None
         start_time = current_time_ms()
@@ -488,9 +595,20 @@ class FrontendServer(object):
         )
         self._access_logger.log_query_access(req)
         is_streaming = self._frontend_worker.is_streaming(req)
+        request_perf_index = self._next_request_perf_index()
+        logging.info(
+            "Request performance start: request_index=%s request_id=%s rank_id=%s server_id=%s shape=[%s]",
+            request_perf_index,
+            req.get(request_id_field_name, ""),
+            self.rank_id,
+            self.server_id,
+            self._request_shape(req),
+        )
         if await raw_request.is_disconnected():
             raise asyncio.CancelledError("client disconnects")
-        res = await self._call_generate_with_report(generate_call)
+        res = await self._call_generate_with_report(
+            req, request_perf_index, generate_call
+        )
 
         if is_streaming:
             return StreamingResponse(

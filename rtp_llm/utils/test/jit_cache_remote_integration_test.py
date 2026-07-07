@@ -223,7 +223,7 @@ class RemoteJitIntegrationTest(_GpuJitTestBase):
         second = _make_jit_manager(self.root / "local_second", remote_root)
         try:
             second.prepare()
-            self.assert_components_have_files(second.local_root)
+            self.assert_components_have_files(remote_root)
         finally:
             second.stop()
 
@@ -231,6 +231,7 @@ class RemoteJitIntegrationTest(_GpuJitTestBase):
         self.run_flashinfer_jit()
         self.run_triton_and_autotune_jit()
         self.run_deep_gemm_jit()
+        self.run_tensorrt_llm_deep_gemm_cache_probe()
         self.run_torch_extension_jit()
         torch.cuda.synchronize()
 
@@ -300,6 +301,12 @@ class RemoteJitIntegrationTest(_GpuJitTestBase):
                 path = local_dir / "cache" / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(b"jit-cache-integration-probe")
+
+    def run_tensorrt_llm_deep_gemm_cache_probe(self) -> None:
+        cache_dir = Path(os.environ["TRTLLM_DG_CACHE_DIR"])
+        path = cache_dir / "cache" / "probe_kernel" / "nvcc_kernel.cubin"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"jit-cache-integration-probe")
 
     def run_torch_extension_jit(self) -> None:
         from torch.utils.cpp_extension import load_inline

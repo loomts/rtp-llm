@@ -43,6 +43,7 @@ def local_rank_start(
     backend_manager = None
     jit_cache_manager = None
     shutdown_requested = threading.Event()
+    process_start = time.monotonic()
     logging.info(f"[PROCESS_START]Start local rank process")
 
     def signal_handler(signum, frame):
@@ -80,6 +81,13 @@ def local_rank_start(
             setproctitle(f"rtp_llm_rank-{local_rank}")
         set_global_controller(global_controller)
         if local_rank == 0:
+            jit_setup_start = time.monotonic()
+            jit_setup_ok = False
+            logging.info(
+                "JIT cache setup start: local_rank=%s world_rank=%s",
+                local_rank,
+                world_rank,
+            )
             try:
                 from rtp_llm.utils.jit_cache_manager import JitCacheManager
 
@@ -91,21 +99,68 @@ def local_rank_start(
                 if shutdown_requested.is_set():
                     raise KeyboardInterrupt("shutdown requested after JIT prepare")
                 jit_cache_manager.start_background_sync()
+                jit_setup_ok = True
             except Exception:
                 logging.exception("JIT cache setup failed; continuing")
             finally:
+                logging.info(
+                    "JIT cache setup finished: local_rank=%s world_rank=%s success=%s duration_ms=%.2f",
+                    local_rank,
+                    world_rank,
+                    jit_setup_ok,
+                    (time.monotonic() - jit_setup_start) * 1000.0,
+                )
                 if jit_ready_event is not None:
                     jit_ready_event.set()
+                    logging.info(
+                        "JIT cache ready event set: local_rank=%s world_rank=%s",
+                        local_rank,
+                        world_rank,
+                    )
         elif jit_ready_event is not None:
             from rtp_llm.utils.jit_cache_manager import JitCacheManager
 
-            jit_ready_event.wait(timeout=600.0)
+            wait_start = time.monotonic()
+            logging.info(
+                "JIT cache wait for rank0 start: local_rank=%s world_rank=%s timeout_s=600.0",
+                local_rank,
+                world_rank,
+            )
+            jit_ready = jit_ready_event.wait(timeout=600.0)
+            logging.info(
+                "JIT cache wait for rank0 done: local_rank=%s world_rank=%s ready=%s duration_ms=%.2f",
+                local_rank,
+                world_rank,
+                jit_ready,
+                (time.monotonic() - wait_start) * 1000.0,
+            )
+            jit_bootstrap_start = time.monotonic()
             JitCacheManager(py_env_configs.jit_config).bootstrap()
+            logging.info(
+                "JIT cache non-rank0 bootstrap done: local_rank=%s world_rank=%s duration_ms=%.2f",
+                local_rank,
+                world_rank,
+                (time.monotonic() - jit_bootstrap_start) * 1000.0,
+            )
+        backend_start = time.monotonic()
         backend_manager = BackendManager(py_env_configs)
         backend_manager.start()
+        backend_ready_ms = (time.monotonic() - backend_start) * 1000.0
+        logging.info(
+            "Backend manager start done: local_rank=%s world_rank=%s duration_ms=%.2f",
+            local_rank,
+            world_rank,
+            backend_ready_ms,
+        )
         # Engine startup overwrites SIGTERM/SIGINT; restore Python handlers
         # so the finally block can flush JIT artifacts on shutdown.
         install_signal_handlers()
+        logging.info(
+            "Backend server ready timing: local_rank=%s world_rank=%s process_start_to_ready_ms=%.2f",
+            local_rank,
+            world_rank,
+            (time.monotonic() - process_start) * 1000.0,
+        )
         logging.info("Backend server initialized successfully, sending ready status")
 
         # Send startup success message

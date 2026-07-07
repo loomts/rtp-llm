@@ -26,9 +26,7 @@ def effective_member_names(root: Path) -> set[str]:
     if not root.is_dir():
         return set()
     return {
-        path.relative_to(root).as_posix()
-        for path in root.rglob("*")
-        if path.is_file()
+        path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()
     }
 
 
@@ -96,15 +94,15 @@ class JitCacheManagerTest(unittest.TestCase):
 
         manager.bootstrap()
 
-        self.assertEqual(manager.local_root, remote)
         self.assertEqual(manager.remote_root, remote)
+        self.assertFalse(hasattr(manager, "local_root"))
         for component in jit_cache_module.COMPONENTS:
             expected = self.component_dir(remote, component.name)
             self.assertEqual(os.environ[component.env_name], str(expected))
             self.assertTrue(expected.is_dir())
         self.assertFalse((self.root / "local").exists())
 
-    def test_missing_remote_falls_back_to_local_jit_dir(self):
+    def test_missing_remote_disables_direct_jit_cache(self):
         local = self.root / "local"
         manager = JitCacheManager(
             self.make_config(local_root=local, remote_root=str(self.root / "missing"))
@@ -112,12 +110,12 @@ class JitCacheManagerTest(unittest.TestCase):
 
         manager.bootstrap()
 
-        self.assertEqual(manager.local_root, local)
         self.assertIsNone(manager.remote_root)
+        self.assertEqual(manager.components, tuple())
+        self.assertFalse(hasattr(manager, "local_root"))
         for component in jit_cache_module.COMPONENTS:
-            expected = self.component_dir(local, component.name)
-            self.assertEqual(os.environ[component.env_name], str(expected))
-            self.assertTrue(expected.is_dir())
+            self.assertNotIn(component.env_name, os.environ)
+        self.assertFalse(local.exists())
 
     def test_remote_config_mounts_uri_before_validation(self):
         mounted_remote = self.root / "mounted_remote"
