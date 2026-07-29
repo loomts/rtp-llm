@@ -80,3 +80,7 @@ docs/index/dist/
 
 # Local analysis reports
 *_analysis_report.md
+
+# sphinx 构建产物与打包 tar 是派生物,不入库(docs/ 源文件不受影响)
+docs/build/
+docs/build_*.tar
