@@ -381,7 +381,8 @@ __global__ void rejection_sampling_kernel(DType*  draft_probs,
     }
     int pos = s_pos;
 
-    // sample from relu(target_probs - draft_probs)
+    // Reaching here implies a stochastic rejection at pos < num_speculative_tokens.
+    // Sample the replacement from relu(target_probs - proposal_probs).
     float                  sum_relu_q_minus_p = 0;
     vec_t<float, VEC_SIZE> q_vec, p_vec;
     float                  relu_q_minus_p[VEC_SIZE];
@@ -419,8 +420,7 @@ __global__ void rejection_sampling_kernel(DType*  draft_probs,
     temp_storage.sampled_id = target_vocab_size - 1;
     __syncthreads();
     sum_relu_q_minus_p = temp_storage.block_aggregate.value;
-    DType u            = uniform_samples[row_idx * (num_speculative_tokens + 1) + min(pos + 1, num_speculative_tokens)]
-              * sum_relu_q_minus_p;
+    DType u            = uniform_samples[row_idx * (num_speculative_tokens + 1) + pos + 1] * sum_relu_q_minus_p;
 
     float aggregate_relu_q_minus_p(0);
 #pragma unroll 2

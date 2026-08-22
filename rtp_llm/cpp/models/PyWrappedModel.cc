@@ -138,20 +138,27 @@ bool PyWrappedModel::hasMtpTargetHiddenBuffer() const {
 
 PyWrappedModel::~PyWrappedModel() {
     try {
+        // Device synchronization can block; keep it outside the GIL while
+        // draining graph work that borrows the ProcessGroup communicator.
+        if (graph_runner_ && PyGILState_Check()) {
+            py::gil_scoped_release release;
+            graph_runner_->synchronizeForShutdown();
+        } else if (graph_runner_) {
+            graph_runner_->synchronizeForShutdown();
+        }
+        // Destroy every Python-owning member in one explicit GIL scope.
         py::gil_scoped_acquire gil;
+        graph_runner_.reset();
         held_attn_pyobj_   = py::object();
         py_forward_method_ = py::object();
-        // Always release py_model_ since it's always initialized now
-        py_model_.release();
-        if (graph_runner_ != nullptr) {
-            delete graph_runner_;
-            graph_runner_ = nullptr;
-        }
+        py_model_          = py::object();
         RTP_LLM_LOG_INFO("PyWrappedModel destroyed, Python object instance released.");
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python error during PyWrappedModel destruction: %s", e.what());
     } catch (const std::exception& e) {
         RTP_LLM_LOG_ERROR("C++ error during PyWrappedModel destruction: %s", e.what());
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("Unknown error during PyWrappedModel destruction");
     }
 }
 
@@ -423,23 +430,20 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
     return by_tag;
 }
 
-// Helper function to build BertEmbeddingInputs from GptModelInputs
-torch_ext::BertEmbeddingInputs PyWrappedModel::buildBertEmbeddingInputs(const GptModelInputs& inputs) {
+// Reuse tensors whose device copies are already available or queued for this forward.
+torch_ext::BertEmbeddingInputs
+PyWrappedModel::buildBertEmbeddingInputs(const torch::Tensor&                combo_position_ids,
+                                         const torch_ext::PyEmbeddingInputs& embedding_inputs) {
     RTP_LLM_PROFILE_SCOPE("py_model.buildBertEmbeddingInputs");
     DevicePerfWrapper              wrapper(enable_device_perf_, "py model buildBertEmbeddingInputs");
     torch_ext::BertEmbeddingInputs bert_embedding_inputs;
 
-    // Convert combo_position_ids from Buffer to torch::Tensor
-    if (inputs.combo_position_ids.defined()) {
-        bert_embedding_inputs.combo_position_ids = inputs.combo_position_ids.cuda();
+    if (combo_position_ids.defined()) {
+        bert_embedding_inputs.combo_position_ids = combo_position_ids;
     }
 
-    // Convert combo_tokens_type_ids from Buffer to torch::Tensor
-    if (inputs.combo_tokens_type_ids.defined()) {
-        {
-            DevicePerfWrapper wrapper(enable_device_perf_, "py model combo_tokens.cuda()");
-            bert_embedding_inputs.combo_tokens_type_ids = inputs.combo_tokens_type_ids.cuda();
-        }
+    if (embedding_inputs.combo_tokens_type_ids.defined()) {
+        bert_embedding_inputs.combo_tokens_type_ids = embedding_inputs.combo_tokens_type_ids;
     }
 
     // Get position_encoding from model weights (no clone needed for weights)
@@ -532,21 +536,22 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
     input_list.reserve(split_inputs.size());
 
     for (size_t i = 0; i < split_inputs.size(); ++i) {
-        const bool  is_real_micro_input   = split_inputs[i].kv_cache_kernel_block_id.defined();
-        const auto& micro_inputs          = is_real_micro_input ? split_inputs[i] : split_inputs[0];
-        auto        py_attn_inputs        = buildPyAttentionInputs(micro_inputs);
-        auto        embedding_inputs      = buildPyEmbeddingInputs(micro_inputs);
-        auto        multimodal_inputs     = buildPyMultimodalInputs(micro_inputs);
-        auto        bert_embedding_inputs = buildBertEmbeddingInputs(micro_inputs);
+        const bool  is_real_micro_input = split_inputs[i].kv_cache_kernel_block_id.defined();
+        const auto& micro_inputs        = is_real_micro_input ? split_inputs[i] : split_inputs[0];
+        auto        py_attn_inputs      = buildPyAttentionInputs(micro_inputs);
+        auto        embedding_inputs    = buildPyEmbeddingInputs(micro_inputs);
+        auto        multimodal_inputs   = buildPyMultimodalInputs(micro_inputs);
         if (is_real_micro_input && py_attn_inputs.is_prefill) {
             py_attn_inputs.cache_store_inputs = prepareWriteCacheParams(micro_inputs);
             if (py_attn_inputs.cache_store_inputs.has_value()) {
                 py_attn_inputs.cache_store_writer = cache_store_async_writer_;
             }
         }
-        torch::Tensor combo_position_ids = micro_inputs.combo_position_ids.defined() ?
-                                               tensorHoldHostAndToCuda(micro_inputs.combo_position_ids) :
-                                               torch::empty({0});
+        torch::Tensor combo_position_ids    = micro_inputs.combo_position_ids.defined() ?
+                                                  tensorHoldHostAndToCuda(micro_inputs.combo_position_ids) :
+                                                  torch::empty({0});
+        auto          bert_embedding_inputs = buildBertEmbeddingInputs(
+            micro_inputs.combo_position_ids.defined() ? combo_position_ids : torch::Tensor(), embedding_inputs);
         calculatePaddingOffsetDeviceAware(py_attn_inputs);
         py_attn_inputs.padding_offset = tensorHoldHostAndToCuda(py_attn_inputs.padding_offset);
         auto attention_inputs_by_tag  = setupKVCacheForAttentionInputs(py_attn_inputs, micro_inputs);
@@ -659,6 +664,27 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs) {
     prepareAttentionInputs(inputs, false);
 }
 
+torch::Tensor PyWrappedModel::comboPositionIdsForGraph(const GptModelInputs& inputs) {
+    // The CUDA-resident position ids the graph runner gates on and copies into the captured
+    // buffer. prepareAttentionInputs() and forward() MUST derive this identically: prepare
+    // decides whether to refresh the captured graph metadata (block table, cu_seqlens,
+    // lengths) and forward decides whether to replay that graph, so if prepare says no and
+    // forward says yes, replay runs on the previous step's metadata. A placeholder here is
+    // exactly that divergence -- canReplaySelectedGraph() rejects an undefined tensor
+    // whenever position_id_len_factor > 0 (MRoPE models such as Qwen3.5) while forward,
+    // holding the real ids, still replays.
+    if (!inputs.combo_position_ids.defined()) {
+        // numel 0 fails the graph runner's validation the same way an undefined
+        // tensor does, so downstream needs no special case.
+        return torch::empty({0});
+    }
+    if (inputs.combo_position_ids.device().is_cuda()) {
+        return inputs.combo_position_ids;
+    }
+    buffer_holder_.hold_host(inputs.combo_position_ids);
+    return inputs.combo_position_ids.to(torch::kCUDA, /*non_blocking=*/true);
+}
+
 void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync) {
     RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs");
     d2d_copies_.clear();
@@ -703,11 +729,12 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
         fusedCopy(d2d_copies_);
     }
 
-    graph_state_         = CudaGraphState();
-    auto empty           = torch::Tensor();
+    graph_state_ = CudaGraphState();
+    auto empty   = torch::Tensor();
+    // Real position ids, not a placeholder — see comboPositionIdsForGraph().
     auto py_model_inputs = PyModelInputs({empty,
                                           empty,
-                                          empty,
+                                          comboPositionIdsForGraph(inputs),
                                           torch_ext::PyEmbeddingInputs(),
                                           torch_ext::PyMultimodalInputs(),
                                           attention_inputs_,
@@ -730,10 +757,12 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
     fusedCopy(d2d_copies_);
 
     if (enable_cuda_graph_) {
-        auto empty           = torch::Tensor();
+        auto empty = torch::Tensor();
+        // Real position ids, or canRun() bails for MRoPE models and silently skips the
+        // block-table refresh this call exists for. See comboPositionIdsForGraph().
         auto py_model_inputs = PyModelInputs({empty,
                                               empty,
-                                              empty,
+                                              comboPositionIdsForGraph(inputs),
                                               torch_ext::PyEmbeddingInputs(),
                                               torch_ext::PyMultimodalInputs(),
                                               attention_inputs_,
@@ -785,19 +814,13 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         torch::Tensor input_hiddens =
             inputs.last_hidden_states.defined() ? inputs.last_hidden_states : torch::empty({0});
 
-        torch::Tensor combo_position_ids = torch::empty({0});
-        if (inputs.combo_position_ids.defined()) {
-            if (inputs.combo_position_ids.device().is_cuda()) {
-                combo_position_ids = inputs.combo_position_ids;
-            } else {
-                buffer_holder_.hold_host(inputs.combo_position_ids);
-                combo_position_ids = inputs.combo_position_ids.to(torch::kCUDA, /*non_blocking=*/true);
-            }
-        }
+        // Same derivation as the prepare stage — see comboPositionIdsForGraph().
+        torch::Tensor combo_position_ids = comboPositionIdsForGraph(inputs);
 
         auto embedding_inputs      = buildPyEmbeddingInputs(inputs);
         auto multimodal_inputs     = buildPyMultimodalInputs(inputs);
-        auto bert_embedding_inputs = buildBertEmbeddingInputs(inputs);
+        auto bert_embedding_inputs = buildBertEmbeddingInputs(
+            inputs.combo_position_ids.defined() ? combo_position_ids : torch::Tensor(), embedding_inputs);
         if (!prepared_attention_inputs_.load(std::memory_order_acquire)) {
             prepareAttentionInputs(inputs, /*skip_forward_event_sync=*/true);
         }
@@ -1001,6 +1024,19 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
     const auto& lm_head = weights_.lm_head;
 
     if (lm_head) {
+        // lm_output_indexes addresses token rows of `hidden`, so a hidden state
+        // that does not cover every announced token turns the gathers below into
+        // out-of-bounds device reads (an HSA/CUDA memory fault with no usable
+        // stack). CUDA-graph replay returns a clamped slice of a fixed-capacity
+        // buffer, which is exactly how that happens; fail here instead.
+        RTP_LLM_CHECK_WITH_INFO(hidden.size(0) >= (int64_t)token_num,
+                                "hidden states cover %ld tokens but %ld were expected "
+                                "(has_context_request=%d, need_all_logits=%d, lm_output_indexes=%ld)",
+                                (long)hidden.size(0),
+                                (long)token_num,
+                                (int)has_context_request,
+                                (int)need_all_logits,
+                                lm_output_indexes.defined() ? (long)lm_output_indexes.numel() : -1L);
         RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(lm_head)");
         if (description_.output_vocab_size > 0) {
             const auto gather_world_size = static_cast<size_t>(device_props_.tp_size);
@@ -1020,6 +1056,37 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
                                     lm_head->kernel.dim() > 0 ? lm_head->kernel.size(0) : -1);
         }
         printTorchTensorData(lm_output_indexes, "lm_output_indexes");
+
+        // The check above only proves `hidden` is long enough for the *announced* token
+        // count; the indexes themselves may still point past it (e.g. built from
+        // pre-rejection lengths), which faults on the device with no usable stack. A
+        // negative index is the likelier failure: the MTP paths build these as
+        // (stride offset + accept_len - 1), so accept_len == 0 yields -1 while max stays
+        // in range.
+        //
+        // Range is guaranteed per residency, and every producer falls into one of the two:
+        //   - host indexes (MTP draft decode builds the verify gather pinned on the host,
+        //     and the copy below is this function's own H2D) are checked right here, for
+        //     free, before that copy;
+        //   - device indexes (the MTP device-state path) are clamped where they are built,
+        //     because checking them here would cost a D2H sync on the decode hot path.
+        if (lm_output_indexes.defined() && lm_output_indexes.numel() > 0 && lm_output_indexes.device().is_cpu()) {
+            const int64_t max_index = lm_output_indexes.max().item<int64_t>();
+            const int64_t min_index = lm_output_indexes.min().item<int64_t>();
+            // Both gathers index rows of `hidden`: directly for the context case,
+            // and via `logits` (one row per hidden row) otherwise.
+            const int64_t rows = hidden.size(0);
+            RTP_LLM_CHECK_WITH_INFO(min_index >= 0 && max_index < rows,
+                                    "lm_output_indexes range [%ld, %ld] does not fit a hidden state with %ld rows "
+                                    "(numel=%ld, token_num=%ld, has_context_request=%d, need_all_logits=%d)",
+                                    (long)min_index,
+                                    (long)max_index,
+                                    (long)rows,
+                                    (long)lm_output_indexes.numel(),
+                                    (long)token_num,
+                                    (int)has_context_request,
+                                    (int)need_all_logits);
+        }
 
         buffer_holder_.hold_host(lm_output_indexes);
         auto lm_output_indexes_device = lm_output_indexes.to(torch::kCUDA, /*non_blocking=*/true);
@@ -1206,11 +1273,10 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
     size_t                      prefill_batch_idx      = 0;
     // TODO(async): micro-batch token slicing still computes CPU scalar sums.
     // Convert explicitly and keep all sliced GptModelInputs device-resident.
-    const auto input_lengths_host = inputs.input_lengths.defined() && inputs.input_lengths.is_cuda() ?
-                                        inputs.input_lengths.cpu().pin_memory() :
-                                        inputs.input_lengths;
-    const auto* input_lengths_ptr =
-        input_lengths_host.defined() ? input_lengths_host.data_ptr<int32_t>() : nullptr;
+    const auto  input_lengths_host = inputs.input_lengths.defined() && inputs.input_lengths.is_cuda() ?
+                                         inputs.input_lengths.cpu().pin_memory() :
+                                         inputs.input_lengths;
+    const auto* input_lengths_ptr  = input_lengths_host.defined() ? input_lengths_host.data_ptr<int32_t>() : nullptr;
 
     if (!micro_batch_plan.enable) {
         RTP_LLM_LOG_DEBUG("micro batch disable when enable is false, use fake");

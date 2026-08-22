@@ -46,7 +46,46 @@ py_test(
         "//rtp_llm:testlib",
         "//rtp_llm/models_py/distributed:collective_torch",
     ],
+    timeout = "moderate",
+)
+
+py_test(
+    name = "collective_torch_allreduce_tier_test",
+    srcs = ["collective_torch_allreduce_tier_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:collective_torch",
+    ],
     timeout = "short",
+    tags = ["rocm"],
+)
+
+py_test(
+    name = "rocm_allreduce_tier_integration_test",
+    srcs = ["rocm_allreduce_tier_integration_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:collective_torch",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm/models_py/modules/base/rocm:rocm_base",
+    ],
+    timeout = "moderate",
+    tags = ["rocm"],
+    exec_properties = {'gpu':'MI308X-ROCM7', 'gpu_count':'2'},
+)
+
+py_test(
+    name = "collective_torch_hipgraph_integration_test",
+    srcs = ["collective_torch_hipgraph_integration_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:collective_torch",
+        "//rtp_llm/models_py/modules/base/rocm:trt_allreduce",
+    ],
+    timeout = "long",
+    env = {"GPU_COUNT": "2"},
+    tags = ["rocm"],
+    exec_properties = {"gpu":"MI308X-ROCM7", "gpu_count":"2"},
 )
 
 py_test(

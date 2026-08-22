@@ -20,12 +20,13 @@ class GenerateStream;
 
 // Side-channel payload for P2P bypass (carries first token, reuse, SP info, position_ids)
 struct P2PSideChannelPayload {
-    int64_t              first_token_id   = -1;
-    int32_t              total_reuse_len  = 0;
-    int32_t              local_reuse_len  = 0;
-    int32_t              remote_reuse_len = 0;
-    int32_t              memory_reuse_len = 0;
-    std::vector<int>     propose_tokens;
+    int64_t          first_token_id   = -1;
+    int32_t          total_reuse_len  = 0;
+    int32_t          local_reuse_len  = 0;
+    int32_t          remote_reuse_len = 0;
+    int32_t          memory_reuse_len = 0;
+    std::vector<int> propose_tokens;
+    // Exact normalized proposal distribution in draft-vocabulary space.
     TensorPB             propose_probs;
     TensorPB             propose_hidden;
     std::vector<int32_t> position_ids;
@@ -89,12 +90,12 @@ public:
     };
 
     /// @brief 向 Prefill server 发起异步 StartLoad RPC，通知其开始向 Decode 发送 KV cache
-    std::shared_ptr<Result> load(int64_t                   request_id,
-                                 const std::string&        prefill_ip,
-                                 uint32_t                  prefill_port,
-                                 const std::string&        unique_key,
-                                 int64_t                   deadline_ms,
-                                 GenerateStream*           generate_stream);
+    std::shared_ptr<Result> load(int64_t            request_id,
+                                 const std::string& prefill_ip,
+                                 uint32_t           prefill_port,
+                                 const std::string& unique_key,
+                                 int64_t            deadline_ms,
+                                 GenerateStream*    generate_stream);
 
 private:
     bool buildAndStartAsyncRpc(const std::shared_ptr<Result>& result,

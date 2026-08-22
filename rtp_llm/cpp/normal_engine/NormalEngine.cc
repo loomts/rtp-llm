@@ -368,8 +368,8 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     // value when the user passed --seq_size_per_block < 256.
     const int cache_gen_num_per_cycle =
         sp_config.type != SP_TYPE_NONE ? static_cast<int>(sp_config.gen_num_per_cycle) : 0;
-    auto cache_config = CacheConfigCreator::createBasicConfig(
-        model_config_, parallelism_config, false, cache_gen_num_per_cycle);
+    auto cache_config =
+        CacheConfigCreator::createBasicConfig(model_config_, parallelism_config, false, cache_gen_num_per_cycle);
     cache_config.block_num = 5;
     // createBasicConfig's SingleConfigCreator / HybridConfigCreator paths can
     // leave kernel_seq_size_per_block at 0 (only the real createConfig path
@@ -456,7 +456,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                                       pd_sep_config,
                                                                       cache_store_config,
                                                                       use_cuda_malloc_block_pool);
-        resource_context_.role_type = pd_sep_config.role_type;
+        resource_context_.role_type     = pd_sep_config.role_type;
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }
@@ -481,7 +481,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                                       pd_sep_config,
                                                                       cache_store_config,
                                                                       use_cuda_malloc_block_pool);
-        resource_context_.role_type = pd_sep_config.role_type;
+        resource_context_.role_type     = pd_sep_config.role_type;
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }
@@ -626,7 +626,16 @@ absl::Status NormalEngine::step() {
         // NormalExecutor drives startStep/finishStep via callbacks; MtpExecutor
         // has no callbacks yet, so bracket the propose path here on the engine
         // loop thread (Kineto requires enable/disable on the same thread).
-        if (propose_params_) {
+        //
+        // Only tp_rank 0 fills `streams` (the schedule block above is rank0-only);
+        // at TP>1 it still enters process() on an empty schedule to drive the
+        // tpSync collective, and those skip_run steps carry no forward. Counting
+        // them consumed rank0's num_steps window before any real forward, so its
+        // step trace held only model_input_gatherer host ops (COV06). Gate rank0's
+        // bracket on a non-empty schedule; non-root's streams is always empty here,
+        // so it keeps bracketing every process() as before.
+        const bool bracket_profiler_step = propose_params_ && (parallelism_config.tp_rank != 0 || !streams.empty());
+        if (bracket_profiler_step) {
             step_profiler_.startStep();
         }
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.execute(stream_size=%zu)", streams.size());
@@ -637,7 +646,7 @@ absl::Status NormalEngine::step() {
             RTP_LLM_PROFILE_SCOPE("engine.normal.refresh_cache_status_snapshot");
             resource_context_.cache_manager->refreshKVCacheInfoSnapshot();
         }
-        if (propose_params_) {
+        if (bracket_profiler_step) {
             step_profiler_.finishStep();
         }
     }

@@ -81,11 +81,17 @@ private:
     std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs);
 
 private:
+    // Single source of truth for the CUDA position ids handed to the graph
+    // runner, shared by prepareAttentionInputs() and forward() so their
+    // canRun() decisions cannot diverge.
+    torch::Tensor comboPositionIdsForGraph(const GptModelInputs& inputs);
+
     // Helper functions to reduce code duplication
     torch_ext::PyAttentionInputs    buildPyAttentionInputs(const GptModelInputs& inputs);
     torch_ext::PyEmbeddingInputs    buildPyEmbeddingInputs(const GptModelInputs& inputs);
     torch_ext::PyMultimodalInputs   buildPyMultimodalInputs(const GptModelInputs& inputs);
-    torch_ext::BertEmbeddingInputs  buildBertEmbeddingInputs(const GptModelInputs& inputs);
+    torch_ext::BertEmbeddingInputs  buildBertEmbeddingInputs(const torch::Tensor&                combo_position_ids,
+                                                             const torch_ext::PyEmbeddingInputs& embedding_inputs);
     torch_ext::AttentionInputsByTag setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs,
                                                                    const GptModelInputs&         inputs);
     GptModelOutputs                 callForwardPostLayers(torch::Tensor         hidden_states,
@@ -129,16 +135,16 @@ private:
     torch::Tensor                                   residual_scale_;
     TensorHolder                                    buffer_holder_;
 
-    GraphBase* graph_runner_{nullptr};
-    py::object py_model_;
-    py::object py_forward_method_;
-    py::object held_attn_pyobj_;
-    bool       enable_cuda_graph_{false};
-    bool       is_prefill_cuda_graph_mode_{false};
-    bool       use_spec_decoding_{false};
-    bool       has_mtp_hidden_buffer_{false};
-    bool       enable_device_perf_{false};
-    bool       check_nan_{false};
+    std::unique_ptr<GraphBase> graph_runner_{nullptr};
+    py::object                 py_model_;
+    py::object                 py_forward_method_;
+    py::object                 held_attn_pyobj_;
+    bool                       enable_cuda_graph_{false};
+    bool                       is_prefill_cuda_graph_mode_{false};
+    bool                       use_spec_decoding_{false};
+    bool                       has_mtp_hidden_buffer_{false};
+    bool                       enable_device_perf_{false};
+    bool                       check_nan_{false};
 
     std::unique_ptr<IContextParallelProcessor> context_parallel_processor_{nullptr};
     std::shared_ptr<CacheStoreAsyncWriter>     cache_store_async_writer_;
@@ -343,14 +349,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             graph_params.sp_steps = params.sp_config.gen_num_per_cycle;
         }
 
-        graph_runner_ = new CudaGraphRunner(graph_params, py_instance, forward_method);
-        RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be nullptr in PyWrapper");
-        {
-            void* nccl_comm = cuda_graph::getGraphCaptureTpNcclComm();
-            cuda_graph::register_graph_capture_nccl_comm(nccl_comm,
-                                                         static_cast<int>(params.parallelism_config.tp_size),
-                                                         static_cast<int>(params.parallelism_config.tp_rank));
-        }
+        graph_runner_ = std::make_unique<CudaGraphRunner>(graph_params, py_instance, forward_method);
 #else
         RTP_LLM_CHECK_WITH_INFO(false, "CUDA/HIP Graph is only supported on CUDA/ROCm platform");
 #endif
@@ -361,7 +360,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             graph_runner_->setTokenTypeEmbedding(weights_.token_type_embedding->kernel.cuda());
         }
         graph_runner_->setInputEmbeddingScalar(description_.input_embedding_scalar);
-        RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be null");
         auto py_initialize_method = py_instance.attr("initialize");
         try {
             py_init_result = py_initialize_method(init_resources);

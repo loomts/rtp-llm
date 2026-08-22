@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <list>
 #include <map>
 #include <memory>
@@ -112,9 +113,8 @@ protected:
     // last_hidden_states hand-off. hidden_rows == 0 means "use the tensor's own
     // row count"; target verify passes the explicit combo row count because a
     // graph replay does not advance the Python-side row counter.
-    void maybeOverrideLastHiddenWithMtpBuffer(GptModelOutputs& model_output,
-                                              ModelBase&       source,
-                                              int64_t          hidden_rows = 0);
+    void
+    maybeOverrideLastHiddenWithMtpBuffer(GptModelOutputs& model_output, ModelBase& source, int64_t hidden_rows = 0);
 
     void maybePrintModelInput(const GptModelInputs& model_input, const std::string& prefix) const;
 
@@ -128,6 +128,9 @@ protected:
     // owns a single phase (sync, prepare, forward, broadcast, dispatch) and
     // preserves the original PROFILE_SCOPE labels.
     void            waitPreviousBookkeepingAndKvSwaps(const std::list<GenerateStreamPtr>& streams);
+    void            materializeTargetVerifyPositionIds(GptModelInputs&     model_input,
+                                                       const StreamGroups& stream_groups,
+                                                       size_t              batch_size);
     void            prepareGrpcMtpDeviceState(const std::list<GenerateStreamPtr>& streams, TensorHolder& host_holder);
     void            launchTargetVerifyPrepareAsync(const GptModelInputs& model_input, size_t batch_size);
     void            launchDraftPrefillPrepareAsync(const GptModelInputs& model_input);
@@ -215,24 +218,24 @@ protected:
                                    const MergedOutput&                          draft_prefill_output);
 
     void releaseAllModelBuffers();
+
 private:
     GptModelOutputs forwardModel(ModelBase* model, const GptModelInputs& inputs, ModelInputsModelRole role);
 
-    std::unique_ptr<ModelBase>               model_;
-    std::unique_ptr<Sampler>                 sampler_;
-    std::unique_ptr<MtpBatchStreamProcessor> batch_stream_processor_;
-    std::shared_ptr<KVCacheManager>          cache_manager_;
-    std::shared_ptr<ModelInputsLogger>       model_inputs_logger_;
-    bool                                     enable_ffn_disaggregate_ = false;
-    bool                                     enable_detail_log_       = false;
-    int                                      tp_rank_                 = 0;
-    ParallelismConfig                        parallelism_config_;
-    kmonitor::MetricsReporterPtr             metrics_reporter_ = nullptr;
+    std::unique_ptr<ModelBase>                                               model_;
+    std::unique_ptr<Sampler>                                                 sampler_;
+    std::unique_ptr<MtpBatchStreamProcessor>                                 batch_stream_processor_;
+    std::shared_ptr<KVCacheManager>                                          cache_manager_;
+    std::shared_ptr<ModelInputsLogger>                                       model_inputs_logger_;
+    bool                                                                     enable_ffn_disaggregate_ = false;
+    bool                                                                     enable_detail_log_       = false;
+    int                                                                      tp_rank_                 = 0;
+    ParallelismConfig                                                        parallelism_config_;
+    kmonitor::MetricsReporterPtr                                             metrics_reporter_ = nullptr;
     MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector> tps_reporter_;
-    WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector>
-        wall_tps_reporter_;
-    std::shared_ptr<ExpertBalancer>                                          expert_balancer_;
-    size_t                                                                   vocab_size_;
+    WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector> wall_tps_reporter_;
+    std::shared_ptr<ExpertBalancer>                                                            expert_balancer_;
+    size_t                                                                                     vocab_size_;
 
     // for mtp
     DataType data_type_;
@@ -257,6 +260,7 @@ private:
 
     bool     warm_up_;
     RoleType role_type_;
+
     // True when any KV-cache group is CacheGroupType::LINEAR (RWKV / Mamba /
     // hybrid linear+full). Per-step state advances every token, so the page
     // table must be re-gathered between draft propose and target verify.

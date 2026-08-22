@@ -1,0 +1,176 @@
+{
+    "model_type": "qwen35_dense",
+    "model_path": "/ckpt/qwen35/Qwen3.5-27B",
+    "query_result": [
+        {
+            "query": {
+                "prompt": "$prompt:s2",
+                "generate_config": {
+                    "max_new_tokens": 8,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "temperature": 0,
+                    "random_seed": 42,
+                    "aux_info": true,
+                    "can_use_pd_separation": true,
+                    "reuse_cache": false
+                }
+            },
+            "result": {
+                "response": "\n\n<think>\n\n</think>\n\n围绕“英语",
+                "response_alternatives": [
+                    "Here's a thinking process that leads to the"
+                ],
+                "finished": true,
+                "aux_info": {
+                    "input_len": 8,
+                    "prefix_len": 0,
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "output_len": 8,
+                    "step_output_len": 7,
+                    "iter_count": 3,
+                    "pd_sep": true
+                }
+            }
+        },
+        {
+            "query": {
+                "prompt": "$prompt:s1",
+                "generate_config": {
+                    "max_new_tokens": 20,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "temperature": 0,
+                    "random_seed": 42,
+                    "aux_info": true,
+                    "can_use_pd_separation": true,
+                    "reuse_cache": false
+                }
+            },
+            "result": {
+                "response": "\n\nThe CAP Theorem, also known as Brewer's Theorem, is a fundamental concept in distributed",
+                "response_alternatives": [
+                    "<think>\n\n</think>\n\nThe **CAP theorem** (also known as Brewer's Theorem) is"
+                ],
+                "finished": true,
+                "aux_info": {
+                    "input_len": 6,
+                    "prefix_len": 0,
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "output_len": 20,
+                    "step_output_len": 19,
+                    "iter_count": 8,
+                    "pd_sep": true
+                }
+            }
+        },
+        {
+            "query": {
+                "prompt": "$prompt:x2",
+                "generate_config": {
+                    "max_new_tokens": 20,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "temperature": 0,
+                    "random_seed": 42,
+                    "aux_info": true,
+                    "can_use_pd_separation": true,
+                    "reuse_cache": true
+                }
+            },
+            "result": {
+                "response": "\r\n\r\n——基本形成现代工业强市格局。工业增加值年均增长12%以上，到2",
+                "response_alternatives": [
+                    "<think>\nHere's a thinking process that leads to the suggested revisions:\n\n",
+                    "<think>\nHere's a thinking process that leads to the suggested revision of the user's prompt:\n\n"
+                ],
+                "finished": true,
+                "aux_info": {
+                    "input_len": 3612,
+                    "prefix_len": 0,
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "output_len": 20,
+                    "step_output_len": 19,
+                    "iter_count": 8,
+                    "pd_sep": true
+                }
+            }
+        },
+        {
+            "query": {
+                "prompt": "$prompt:x2",
+                "generate_config": {
+                    "max_new_tokens": 20,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "temperature": 0,
+                    "random_seed": 42,
+                    "aux_info": true,
+                    "can_use_pd_separation": true,
+                    "reuse_cache": true
+                }
+            },
+            "result": {
+                "response": "\r\n\r\n——基本形成现代工业强市格局。工业增加值年均增长12%以上，到2",
+                "response_alternatives": [
+                    "<think>\nHere's a thinking process that leads to the suggested revisions:\n\n",
+                    "<think>\nHere's a thinking process that leads to the suggested revision of the user's prompt:\n\n"
+                ],
+                "finished": true,
+                "aux_info": {
+                    "input_len": 3612,
+                    "prefix_len": 0,
+                    "reuse_len": 3072,
+                    "local_reuse_len": 3072,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "prefill_total_reuse_len": 3072,
+                    "prefill_local_reuse_len": 3072,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "output_len": 20,
+                    "step_output_len": 19,
+                    "iter_count": 8,
+                    "pd_sep": true
+                }
+            }
+        }
+    ]
+}

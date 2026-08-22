@@ -74,6 +74,29 @@ class GenericMoeLayer(nn.Module):
             )
         else:
             self.fake_balance_expert = None
+        self.add_shared_expert = config.moe_style == 2
+
+        # Detect shared expert fusion: the weight loader appends the shared
+        # expert as expert #N, making moe_w1.shape[0] == expert_num + 1.
+        # Exclude EPLB redundant experts (phy_exp_num > expert_num) which
+        # also increase shape[0] but are not shared expert fusion.
+        moe_w1 = weights.get(W.moe_w1, None)
+        num_loaded_experts = moe_w1.shape[0] if moe_w1 is not None else 0
+        phy_exp_num = config.eplb_config.phy_exp_num(config.expert_num)
+        is_tp_only = (
+            self.ep_size == 1
+            and parallelism_config.dp_size == 1
+            and self.ffn_tp_size == parallelism_config.get_attn_tp_size()
+        )
+        self.use_fused_shared_expert = (
+            self.add_shared_expert
+            and is_tp_only
+            and num_loaded_experts > config.expert_num
+            and phy_exp_num == config.expert_num
+        )
+        if self.use_fused_shared_expert:
+            self.fused_shared_expert_id = config.expert_num
+
         config_adapter = MoEConfigAdapter(
             model_config=config,
             parallelism_config=parallelism_config,
@@ -81,6 +104,13 @@ class GenericMoeLayer(nn.Module):
             quant_config=quant_config,
             enable_cuda_graph=enable_cuda_graph,
         )
+        if self.use_fused_shared_expert:
+            config_adapter.expert_num = num_loaded_experts
+            logging.info(
+                "shared expert fused as expert %d (total %d experts in moe_w1)",
+                self.fused_shared_expert_id,
+                num_loaded_experts,
+            )
         self.fused_moe = FusedMoeFactory().create_fused_moe(config_adapter, weights)
         router = self.fused_moe.router
         router_tp_size = router.tp_collective_size
@@ -91,33 +121,44 @@ class GenericMoeLayer(nn.Module):
             self.w1 is not None and self.w2 is not None
         ), "Weights w1 and w2 must be provided"
         self.num_local_experts = self.w1.shape[0]
-        self.add_shared_expert = config.moe_style == 2
-        if self.add_shared_expert:
-            self.shared_expert = DenseMLP(
-                config.activation_type,
-                parallelism_config,
-                weights,
-                quant_config,
-                hw_kernel_config=hw_kernel_config,
-            )
-        else:
+        if self.use_fused_shared_expert:
             self.shared_expert = None
-        if weights.get(W.shared_expert_gate, None) is not None:
-            self.shared_expert_gate = LinearFactory.create_linear_from_weights(
-                weights,
-                W.shared_expert_gate,
-                None,
-                None,
-                quant_config=quant_config,
-                # For ROCm devices shared_expert_gate is not pre-swizzled during weight
-                # loading and its single output column does not satisfy the SwizzleA
-                # layout. Keep this scalar projection on the no-swizzle backend.
-                hw_kernel_config=None,
-            )
-            self.sigmoid_gate_scale_add = SigmoidGateScaleAdd()
-        else:
-            self.shared_expert_gate = None
+            if weights.get(W.shared_expert_gate, None) is not None:
+                self.shared_expert_gate = LinearFactory.create_linear_from_weights(
+                    weights,
+                    W.shared_expert_gate,
+                    None,
+                    None,
+                    quant_config=quant_config,
+                    hw_kernel_config=None,
+                )
+            else:
+                self.shared_expert_gate = None
             self.sigmoid_gate_scale_add = None
+        else:
+            if self.add_shared_expert:
+                self.shared_expert = DenseMLP(
+                    config.activation_type,
+                    parallelism_config,
+                    weights,
+                    quant_config,
+                    hw_kernel_config=hw_kernel_config,
+                )
+            else:
+                self.shared_expert = None
+            if weights.get(W.shared_expert_gate, None) is not None:
+                self.shared_expert_gate = LinearFactory.create_linear_from_weights(
+                    weights,
+                    W.shared_expert_gate,
+                    None,
+                    None,
+                    quant_config=quant_config,
+                    hw_kernel_config=None,
+                )
+                self.sigmoid_gate_scale_add = SigmoidGateScaleAdd()
+            else:
+                self.shared_expert_gate = None
+                self.sigmoid_gate_scale_add = None
 
         self.use_ep_shared_allreduce = (
             self.shared_expert is not None and self.ffn_tp_size > 1 and self.ep_size > 1
@@ -167,6 +208,26 @@ class GenericMoeLayer(nn.Module):
             return torch.sigmoid(gate_output) * shared_expert_output
         return shared_expert_output
 
+    def _extend_topk_with_shared_expert(self, topk_ids, topk_weights, hidden_states):
+        num_tokens = topk_ids.shape[0]
+        k = topk_ids.shape[1]
+        ext_ids = torch.empty(
+            (num_tokens, k + 1), dtype=topk_ids.dtype, device=topk_ids.device
+        )
+        ext_weights = torch.empty(
+            (num_tokens, k + 1), dtype=topk_weights.dtype, device=topk_weights.device
+        )
+        ext_ids[:, :k] = topk_ids
+        ext_ids[:, k] = self.fused_shared_expert_id
+        ext_weights[:, :k] = topk_weights
+        if self.shared_expert_gate is not None:
+            ext_weights[:, k:] = torch.sigmoid(
+                self.shared_expert_gate(hidden_states)
+            ).float()
+        else:
+            ext_weights[:, k] = 1.0
+        return ext_ids, ext_weights
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
         router_logits = self.gate(hidden_states)
@@ -211,11 +272,20 @@ class GenericMoeLayer(nn.Module):
         if self.fake_balance_expert is not None:
             self.fake_balance_expert(topk_ids, topk_weights)
 
+        if self.use_fused_shared_expert:
+            topk_ids, topk_weights = self._extend_topk_with_shared_expert(
+                topk_ids, topk_weights, hidden_states
+            )
+            return self.fused_moe(
+                hidden_states=hidden_states,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation="SiGLU",
+            )
+
         # In pure-TP mode both the routed experts and the shared expert produce
-        # TP-partial outputs.  Reduce their sum once instead of reducing each
-        # path separately.  This is especially important for decode, where the
-        # hidden dimension is small enough that collective launch latency
-        # dominates the payload transfer.
+        # TP-partial outputs. Reduce their sum once instead of reducing each
+        # path separately.
         experts_output = self.fused_moe(
             hidden_states=hidden_states,
             topk_weights=topk_weights,

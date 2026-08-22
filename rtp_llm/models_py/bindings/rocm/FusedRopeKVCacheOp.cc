@@ -163,9 +163,24 @@ void updateKvCacheOffset(CKAttn& params, const torch::Tensor& kv_cache_block_id_
     TORCH_CHECK(kv_cache_block_id_device.scalar_type() == at::kInt,
                 "kv_cache_block_id_device must be int32, got ",
                 kv_cache_block_id_device.scalar_type());
-    const int   batch_size        = kv_cache_block_id_device.size(0);
-    const int   max_blocks_per_bs = kv_cache_block_id_device.size(1);
-    hipStream_t stream            = GET_CURRENT_STREAM();
+    const int batch_size        = kv_cache_block_id_device.size(0);
+    const int max_blocks_per_bs = kv_cache_block_id_device.size(1);
+    // params.kv_cache_offset is allocated once by PrepareCKAttn (at capture time on the graph
+    // path) and its address is baked into the by-value KVBlockArray kernarg, so it can never be
+    // reallocated here -- but the write extent comes from the runtime block table. A table larger
+    // than the captured one would write past the buffer and leave KVBlockArray describing a
+    // geometry the storage does not have.
+    const int64_t required = static_cast<int64_t>(batch_size) * 2 * max_blocks_per_bs;
+    TORCH_CHECK(required <= params.kv_cache_offset.numel(),
+                "updateKvCacheOffset would overflow the captured kv_cache_offset: runtime block table is ",
+                batch_size,
+                "x",
+                max_blocks_per_bs,
+                " (needs ",
+                required,
+                " int32) but the buffer holds ",
+                params.kv_cache_offset.numel());
+    hipStream_t stream = GET_CURRENT_STREAM();
     invokeConvertOffsetToBlockArrayData(params.kv_cache_offset.data_ptr<int>(),
                                         kv_cache_block_id_device.data_ptr<int>(),
                                         batch_size,
@@ -200,6 +215,13 @@ void prepareInPlace(CKAttn& params, const torch_ext::PyAttentionInputs& attn_inp
     params.prefill_runtime_seq_len_with_prefix = params.prefill_runtime_max_seq_len + max_prefix_len;
 
     updateKvCacheOffset(params, attn_inputs.kv_cache_kernel_block_id_device);
+
+    // Graph replay normally updates the captured position-id storage in place.
+    // Copy explicitly when a non-graph caller supplies a different buffer.
+    if (attn_inputs.combo_position_ids.defined() && params.position_ids.defined()
+        && attn_inputs.combo_position_ids.data_ptr() != params.position_ids.data_ptr()) {
+        copyTensorExactInPlace(params.position_ids, attn_inputs.combo_position_ids, "position_ids");
+    }
 }
 
 FusedRopeKVCachePrefillOpBase::FusedRopeKVCachePrefillOpBase(const AttentionConfigs& attn_configs):
@@ -383,6 +405,10 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
     }
     if (params->position_ids.defined()) {
         position_ids = params->position_ids.data_ptr<int>();
+    } else if (attn_configs_.rope_config.style == RopeStyle::Mrope) {
+        throw std::runtime_error("FusedRopeKVCachePrefillOp: Mrope requires combo_position_ids but "
+                                 "none were provided. Ensure combo_position_ids is set in "
+                                 "PyAttentionInputs before calling prefill.");
     }
 
     if (use_asm()) {
@@ -562,12 +588,55 @@ torch::Tensor FusedRopeKVCacheDecodeOpBase::forward(const torch::Tensor&        
     bool   store_kv    = false;
     bool   store_cache = kv_cache.has_value();
 
+    // The decode kernel derives every index from its launch geometry (grid is
+    // (token_num, head_num), seq_len is 1) and clamps nothing: batch_idx indexes
+    // sequence_lengths, whose value then becomes a KV store offset. On the CUDA-graph path
+    // those lengths live in pinned host memory, so a bad one silently becomes a wild device
+    // address that faults far from its cause. Check on the host, where already-resident
+    // lengths cost no synchronization.
+    RTP_LLM_CHECK_WITH_INFO(token_num <= batch_size * static_cast<int>(seq_len),
+                            "FusedRopeKVCacheDecodeOp: token_num=%d exceeds batch_size=%d * seq_len=%d, "
+                            "the kernel would index sequence_lengths out of range",
+                            token_num,
+                            batch_size,
+                            static_cast<int>(seq_len));
+    RTP_LLM_CHECK_WITH_INFO(batch_size <= kv_block_array.mMaxSeqs,
+                            "FusedRopeKVCacheDecodeOp: batch_size=%d exceeds kv block table capacity "
+                            "mMaxSeqs=%d",
+                            batch_size,
+                            kv_block_array.mMaxSeqs);
+    if (store_cache && !params->sequence_lengths.is_cuda() && params->sequence_lengths.numel() >= batch_size) {
+        const int64_t kv_token_capacity =
+            static_cast<int64_t>(kv_block_array.mMaxBlocksPerSeq) * kv_block_array.mTokensPerBlock;
+        const int* sequence_lengths_host = params->sequence_lengths.data_ptr<int>();
+        for (int i = 0; i < batch_size; ++i) {
+            const int64_t dst_kv_seq_idx = static_cast<int64_t>(sequence_lengths_host[i]) + max_prefix_length;
+            RTP_LLM_CHECK_WITH_INFO(dst_kv_seq_idx >= 0 && dst_kv_seq_idx < kv_token_capacity,
+                                    "FusedRopeKVCacheDecodeOp: sequence_lengths[%d]=%d (+max_prefix=%d) maps to kv "
+                                    "token %ld, outside the block table capacity %ld "
+                                    "(mMaxBlocksPerSeq=%d * mTokensPerBlock=%d); batch_size=%d token_num=%d",
+                                    i,
+                                    sequence_lengths_host[i],
+                                    max_prefix_length,
+                                    static_cast<long>(dst_kv_seq_idx),
+                                    static_cast<long>(kv_token_capacity),
+                                    kv_block_array.mMaxBlocksPerSeq,
+                                    kv_block_array.mTokensPerBlock,
+                                    batch_size,
+                                    token_num);
+        }
+    }
+
     // Always use aiter_pa for ROCm
     hipStream_t stream_ = GET_CURRENT_STREAM();
 
     int* position_ids_ptr = nullptr;
     if (params->position_ids.defined()) {
         position_ids_ptr = params->position_ids.data_ptr<int>();
+    } else if (attn_configs_.rope_config.style == RopeStyle::Mrope) {
+        throw std::runtime_error("FusedRopeKVCacheDecodeOp: Mrope requires combo_position_ids but "
+                                 "none were provided. This typically means CUDA graph capture is "
+                                 "running with Mrope, which is not yet supported on ROCm.");
     } else {
         position_ids_ptr = params->sequence_lengths.data_ptr<int>();
     }

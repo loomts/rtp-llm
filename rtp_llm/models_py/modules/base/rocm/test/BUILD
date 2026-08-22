@@ -73,10 +73,20 @@ py_test(
         "//rtp_llm:testlib",
         "//rtp_llm/models_py/modules/base/rocm:trt_allreduce",
     ],
-    timeout = 'moderate',
+    timeout = "long",
     env = {"GPU_COUNT": "2"},
     tags = ["rocm"],
     exec_properties = {'gpu':'MI308X-ROCM7', 'gpu_count':'2'},
+)
+
+py_test(
+    name = "trt_allreduce_unit_test",
+    srcs = ["trt_allreduce_unit_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/modules/base/rocm:trt_allreduce",
+    ],
+    timeout = "moderate",
 )
 
 py_test(
@@ -86,7 +96,7 @@ py_test(
         "//rtp_llm:testlib",
         "//rtp_llm/models_py/modules/base/rocm:trt_allreduce",
     ],
-    timeout = "moderate",
+    timeout = "long",
     env = {"GPU_COUNT": "2"},
     tags = ["rocm"],
     exec_properties = {'gpu':'MI308X-ROCM7', 'gpu_count':'2'},
@@ -104,3 +114,12 @@ py_test(
     exec_properties = {'gpu':'MI308X-ROCM7', 'gpu_count':'2'},
 )
 
+py_test(
+    name = "test_aiter_custom_allreduce_dtype",
+    srcs = ["test_aiter_custom_allreduce_dtype.py"],
+    deps = [
+        "//rtp_llm/models_py/modules/base/rocm:rocm_base",
+    ],
+    timeout = "short",
+    tags = ["rocm"],
+)

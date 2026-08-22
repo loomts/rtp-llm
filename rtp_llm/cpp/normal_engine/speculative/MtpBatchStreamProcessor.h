@@ -60,7 +60,18 @@ public:
                                                   GptModelInputs&     model_input,
                                                   TensorHolder&       host_holder) const;
 
-    void expandTargetVerifyPositionIds(const StreamGroups& stream_groups, GptModelInputs& model_input) const;
+    // Rewrites combo_position_ids from one position per sequence to the
+    // target-verify width (propose_step + 1 positions per sequence). Idempotent:
+    // a tensor that already has the verify width is left untouched, so the same
+    // decode step may call this both before async target-verify prepare and from
+    // draftModelDecode.
+    void expandTargetVerifyPositionIds(const StreamGroups& stream_groups,
+                                       GptModelInputs&     model_input,
+                                       size_t              batch_size) const;
+
+    // True when combo_position_ids already holds batch_size * (propose_step + 1)
+    // positions, i.e. expandTargetVerifyPositionIds has run for this step.
+    bool isTargetVerifyPositionIdsExpanded(const torch::Tensor& combo_position_ids, size_t batch_size) const;
 
     void updateDecodeDraftModelInput(GptModelInputs&        model_input,
                                      const GptModelOutputs& model_output,

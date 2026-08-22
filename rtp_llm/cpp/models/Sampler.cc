@@ -123,12 +123,6 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
         torch::empty({(int64_t)inputs.batch_size}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA));
     auto all_beam_indices =
         has_num_beams ? torch::empty({(int64_t)inputs.batch_size_out}, torch::kInt32) : torch::Tensor();
-#if USING_ROCM
-    // ROCm: hipMemcpyAsync from pageable memory is truly async, and
-    // Tensor::record_stream() rejects at::hip streams (aborts with a device
-    // type check), so keep the blocking transfer here.
-    auto inputs_token_ids_cuda = inputs.token_ids.to(torch::kCUDA);
-#else
     torch::Tensor inputs_token_ids_cuda;
     {
         auto main_stream     = cuda_graph::graphGetCurrentStream();
@@ -139,9 +133,8 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
             copy_done_event.record(copy_stream_);
         }
         copy_done_event.block(main_stream);
-        inputs_token_ids_cuda.record_stream(main_stream);
+        cuda_graph::recordTensorUseOnStream(inputs_token_ids_cuda, main_stream);
     }
-#endif
 
     auto all_token_ids_out     = requires_independent_output ?
                                      torch::empty({(int64_t)inputs.batch_size_out, (int64_t)max_seq_len},

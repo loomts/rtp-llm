@@ -62,14 +62,12 @@ RejectionSamplingLaunchConfig validateRejectionSamplingParams(const RejectionSam
         checkSameDevice(params.draft_probs_d, "draft_probs_d", device);
     }
     checkRejectionSamplingTensor(params.uniform_samples_d, "uniform_samples_d", torch::kFloat32, 2);
-    checkRejectionSamplingTensor(params.target_probs_d, "target_probs_d", torch::kFloat32, 3);
     checkRejectionSamplingTensor(params.target_token_ids_d, "target_token_ids_d", torch::kInt32, 2);
     checkRejectionSamplingTensor(params.output_token_ids_d, "output_token_ids_d", torch::kInt32, 2);
     checkRejectionSamplingTensor(params.output_accepted_token_num_d, "output_accepted_token_num_d", torch::kInt32, 1);
     checkRejectionSamplingTensor(params.do_sample_d, "do_sample_d", torch::kBool, 1);
 
     checkSameDevice(params.uniform_samples_d, "uniform_samples_d", device);
-    checkSameDevice(params.target_probs_d, "target_probs_d", device);
     checkSameDevice(params.target_token_ids_d, "target_token_ids_d", device);
     checkSameDevice(params.output_token_ids_d, "output_token_ids_d", device);
     checkSameDevice(params.output_accepted_token_num_d, "output_accepted_token_num_d", device);
@@ -89,7 +87,6 @@ RejectionSamplingLaunchConfig validateRejectionSamplingParams(const RejectionSam
     RTP_LLM_CHECK_WITH_INFO(target_token_stride <= std::numeric_limits<int>::max(), "target_token_stride too large");
 
     const int64_t target_token_rows = batch_size * (num_speculative_tokens + 1);
-
     if (!point_mass) {
         RTP_LLM_CHECK_WITH_INFO(params.draft_probs_d.size(0) == batch_size, "draft_probs_d shape[0] mismatch");
         RTP_LLM_CHECK_WITH_INFO(params.draft_probs_d.size(1) == num_speculative_tokens,
@@ -736,7 +733,18 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
         torch::Tensor selected_tokens = torch::argmax(probs_t, -1, /*keepdim=*/false);
         samples_t.copy_(selected_tokens);
         if (need_renorm_probs) {
-            top_k_renorm_probs(probs_t, output_all_probs_t, top_k_t, 0, reinterpret_cast<uintptr_t>(cur_stream));
+            // Every top_k is 1, so renormalising over the top 1 entry yields a point
+            // mass on the argmax computed just above -- the radix renorm spends
+            // ~305 us/round at gen_batch=8 rediscovering it. Write the one-hot
+            // directly. Fall back to the renorm when the logits are wider than the
+            // probability buffer, since then an argmax index is not necessarily a
+            // valid column of that buffer. Validated exact in AB05.
+            if (output_all_probs_t.size(1) == probs_t.size(1)) {
+                output_all_probs_t.zero_();
+                output_all_probs_t.scatter_(1, selected_tokens.unsqueeze(1), 1.0);
+            } else {
+                top_k_renorm_probs(probs_t, output_all_probs_t, top_k_t, 0, reinterpret_cast<uintptr_t>(cur_stream));
+            }
         }
     } else {
         // Use pure PyTorch sampling instead of FlashInfer ROCm kernels.

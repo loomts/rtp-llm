@@ -205,6 +205,8 @@ void invokeMtpSpecDecodeTokensMetadataPrepare(const std::vector<torch::Tensor>& 
 
 // Fused kernel: next_seq_len[i] = prev_seq_len[i] + accept_len[i]
 //               hidden_idx[i]  = (int64_t)(accept_len[i] - 1)
+//
+// Raw arithmetic only; dispatchDecodeAsync documents the fail-fast contract.
 __global__ void mtpDispatchStatePrepareKernel(const int32_t* __restrict__ accept_len,
                                               const int32_t* __restrict__ prev_seq_len,
                                               int32_t* __restrict__ next_seq_len,
@@ -214,9 +216,9 @@ __global__ void mtpDispatchStatePrepareKernel(const int32_t* __restrict__ accept
     if (idx >= batch_size) {
         return;
     }
-    const int32_t al   = accept_len[idx];
-    next_seq_len[idx]  = prev_seq_len[idx] + al;
-    hidden_idx[idx]    = static_cast<int64_t>(al - 1);
+    const int32_t al  = accept_len[idx];
+    next_seq_len[idx] = prev_seq_len[idx] + al;
+    hidden_idx[idx]   = static_cast<int64_t>(al - 1);
 }
 
 void invokeMtpDispatchStatePrepare(const torch::Tensor& accept_len,
@@ -234,10 +236,8 @@ void invokeMtpDispatchStatePrepare(const torch::Tensor& accept_len,
     RTP_LLM_CHECK_WITH_INFO(hidden_idx.defined() && hidden_idx.is_cuda(), "hidden_idx must be CUDA");
     RTP_LLM_CHECK_WITH_INFO(hidden_idx.scalar_type() == torch::kInt64, "hidden_idx must be int64");
     RTP_LLM_CHECK_WITH_INFO(hidden_idx.is_contiguous(), "hidden_idx must be contiguous");
-    RTP_LLM_CHECK_WITH_INFO(hidden_idx.numel() >= batch_size,
-                            "hidden_idx numel %ld < batch_size %ld",
-                            hidden_idx.numel(),
-                            batch_size);
+    RTP_LLM_CHECK_WITH_INFO(
+        hidden_idx.numel() >= batch_size, "hidden_idx numel %ld < batch_size %ld", hidden_idx.numel(), batch_size);
 
     constexpr int block_size = 256;
     const int     grid_size  = static_cast<int>((batch_size + block_size - 1) / block_size);

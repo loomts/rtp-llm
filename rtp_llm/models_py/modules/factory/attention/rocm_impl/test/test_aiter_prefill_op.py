@@ -38,7 +38,6 @@ except ImportError:
     _AITER_AVAILABLE = False
 
 try:
-    from rtp_llm.models_py.modules.factory.attention import attn_factory
     from rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter import (
         AiterDecodeImplTriton,
         AiterPrefillAttnOp,
@@ -49,11 +48,9 @@ try:
         AiterPrefillImplPaged,
         FMHAParams,
         _run_triton_paged_attention,
-        validate_v_layout,
     )
     from rtp_llm.ops import (
         AttentionConfigs,
-        FMHAConfig,
         KvCacheDataType,
         PyAttentionInputs,
         RopeConfig,
@@ -1479,13 +1476,48 @@ class TestAiterPrefillTritonCudaGraphNumerics(unittest.TestCase):
                     self._run_replay_case(kv_cache_dtype, replay_lengths)
 
 
+@unittest.skipUnless(_OPS_IMPORTABLE, "Requires AiterPrefillAttnOpTriton module")
+class TestTritonCompactIndices(unittest.TestCase):
+    """MTP replay must compact from the capture-width dense output."""
+
+    def test_short_replay_uses_capture_query_width(self):
+        from types import SimpleNamespace
+
+        cfg = _make_attn_configs(head_num=4, head_num_kv=2, head_dim=8)
+        op = AiterPrefillAttnOpTriton(cfg, linear_v=False)
+        params = SimpleNamespace(
+            cu_seqlens_q=torch.tensor([0, 1, 1], dtype=torch.int32),
+            max_seqlen_q=1,
+            graph_query_length=4,
+            token_q_num=1,
+        )
+
+        # Batch row 0 has one live token and row 1 is padded.  In the captured
+        # [2, 4] dense output the token is right-aligned at slot 3.
+        self.assertEqual(op._calc_compact_indices(params).tolist(), [3])
+
+    def test_replay_query_wider_than_capture_fails_fast(self):
+        from types import SimpleNamespace
+
+        cfg = _make_attn_configs(head_num=4, head_num_kv=2, head_dim=8)
+        op = AiterPrefillAttnOpTriton(cfg, linear_v=False)
+        params = SimpleNamespace(
+            cu_seqlens_q=torch.tensor([0, 5], dtype=torch.int32),
+            max_seqlen_q=5,
+            graph_query_length=4,
+            token_q_num=5,
+        )
+
+        with self.assertRaisesRegex(ValueError, "dense query width"):
+            op._calc_compact_indices(params)
+
+
 @unittest.skipUnless(_OPS_IMPORTABLE, "Requires AiterPrefillAttnOp module")
 class TestCompactGatherReshape(unittest.TestCase):
     """Regression tests for _gather_and_reshape_kv_compact and block_table sanitize/pad.
 
-    Validates that the compact gather path produces the same K/V layout as
-    _reshape_kv_cache_vectorized for the referenced blocks, and that the
-    block_table sanitize/pad logic correctly fills padding columns.
+    Validates the compact gather against the K-vectorized/V-linear source address
+    formulas and checks that block_table sanitize/pad fills padding columns.
 
     These tests run on CPU (no aiter kernel needed) — they only exercise the
     tensor reshape / gather / sanitize logic. End-to-end kernel coverage
@@ -1500,6 +1532,7 @@ class TestCompactGatherReshape(unittest.TestCase):
         head_dim=128,
         tokens_per_block=16,
         kv_cache_dtype=None,
+        linear_v=True,
     ):
         cfg = _make_attn_configs(
             head_num=8,
@@ -1509,7 +1542,7 @@ class TestCompactGatherReshape(unittest.TestCase):
         )
         if kv_cache_dtype is not None:
             cfg.kv_cache_dtype = kv_cache_dtype
-        return AiterPrefillAttnOp(cfg, v1_kv_layout=True)
+        return AiterPrefillAttnOp(cfg, linear_v=linear_v)
 
     def _make_kv_cache_5d(self, num_blocks, hk, ps, hd, dtype=torch.float16):
         """Create a 5D KV cache: [num_blocks, 2, hk, ps, hd]."""
@@ -1520,12 +1553,9 @@ class TestCompactGatherReshape(unittest.TestCase):
         return torch.randn(num_blocks, 2 * hk * ps * hd, dtype=dtype)
 
     def _make_compact_bufs(self, block_table, hk, ps, hd, dtype=torch.float16):
-        """Build block_indices, compact_block_table, and compact K/V buffers."""
+        """Build block indices and compact K/V buffers."""
         block_indices = block_table.reshape(-1).to(torch.int64)
         num_gathered = block_indices.numel()
-        compact_block_table = torch.arange(
-            num_gathered, dtype=torch.int32, device=block_table.device
-        ).view_as(block_table)
         vs = 16 // torch.tensor([], dtype=dtype).element_size()
         n = num_gathered + 1
         k_buf = torch.zeros(
@@ -1534,12 +1564,11 @@ class TestCompactGatherReshape(unittest.TestCase):
         v_buf = torch.zeros(
             (n, hk, ps // vs, hd, vs), dtype=dtype, device=block_table.device
         )
-        return block_indices, compact_block_table, k_buf, v_buf
+        return block_indices, k_buf, v_buf
 
     def _assert_compact_equiv(self, op, kv_cache, block_table):
-        """Assert compact gather plus remap equals full reshape indexed by block_table."""
-        k_full, v_full = op._reshape_kv_cache_vectorized(kv_cache)
-        block_indices, compact_bt, k_buf, v_buf = self._make_compact_bufs(
+        """Assert compact K/V matches the referenced source blocks."""
+        block_indices, k_buf, v_buf = self._make_compact_bufs(
             block_table,
             op.head_num_kv,
             op.tokens_per_block,
@@ -1550,26 +1579,33 @@ class TestCompactGatherReshape(unittest.TestCase):
             kv_cache, block_indices, k_buf, v_buf
         )
 
-        # Remapped compact K/V should produce the same per-table K/V as the
-        # original full K/V indexed by the original block_table.
-        flat_bt = compact_bt.reshape(-1).to(torch.int64)
-        orig_indices = block_table.reshape(-1).to(torch.int64)
-        torch.testing.assert_close(k_compact[flat_bt], k_full[orig_indices])
-        torch.testing.assert_close(v_compact[flat_bt], v_full[orig_indices])
+        n = block_indices.numel()
+        hk = op.head_num_kv
+        ps = op.tokens_per_block
+        hd = op.head_dim
+        vs = 16 // kv_cache.element_size()
+        flat = kv_cache.reshape(kv_cache.shape[0], 2, hk, ps * hd)
+        k_used = flat[:, 0].index_select(0, block_indices)
+        v_used = flat[:, 1].index_select(0, block_indices)
+        expected_k = k_used.view(n, hk, hd // vs, ps, vs)
+        expected_v = v_used.view(n, hk, hd, ps // vs, vs).permute(0, 1, 3, 2, 4)
+        torch.testing.assert_close(k_compact[:n], expected_k)
+        torch.testing.assert_close(v_compact[:n], expected_v)
         # Compact buffer has all referenced blocks + 1 trailing dummy zero-block
         # for CK speculative prefetch safety (no dedup since torch.unique removed).
-        self.assertEqual(k_compact.shape[0], orig_indices.numel() + 1)
+        self.assertEqual(k_compact.shape[0], n + 1)
+        self.assertEqual(torch.count_nonzero(k_compact[-1]).item(), 0)
+        self.assertEqual(torch.count_nonzero(v_compact[-1]).item(), 0)
 
-    def test_kv_cache_dtype_controls_compact_mode(self):
+    def test_kv_cache_dtype_controls_cache_tensor_dtype(self):
         cases = [
-            (KvCacheDataType.BASE, torch.float16, True),
-            (KvCacheDataType.FP8, torch.float8_e4m3fn, False),
+            (KvCacheDataType.BASE, torch.float16),
+            (KvCacheDataType.FP8, torch.float8_e4m3fn),
         ]
-        for kv_cache_dtype, expected_torch_dtype, expected_use_compact in cases:
+        for kv_cache_dtype, expected_torch_dtype in cases:
             with self.subTest(kv_cache_dtype=kv_cache_dtype):
                 op = self._make_op(kv_cache_dtype=kv_cache_dtype)
                 self.assertEqual(op.kv_cache_torch_dtype, expected_torch_dtype)
-                self.assertEqual(op.use_compact, expected_use_compact)
 
     # ---- 5D cache path ----------------------------------------------------
 
@@ -1590,18 +1626,7 @@ class TestCompactGatherReshape(unittest.TestCase):
         op = self._make_op()
         kv = self._make_kv_cache_5d(16, 4, 16, 128)
         bt = torch.tensor([[0, 0, 1], [0, 2, 2]], dtype=torch.int32)
-        block_indices, compact_bt, k_buf, v_buf = self._make_compact_bufs(
-            bt, 4, 16, 128
-        )
-        k_compact, v_compact = op._gather_and_reshape_kv_compact(
-            kv, block_indices, k_buf, v_buf
-        )
-        k_full, _ = op._reshape_kv_cache_vectorized(kv)
-        orig_indices = bt.reshape(-1).to(torch.int64)
-        torch.testing.assert_close(
-            k_compact[compact_bt.reshape(-1).to(torch.int64)], k_full[orig_indices]
-        )
-        self.assertEqual(k_compact.shape[0], bt.numel() + 1)
+        self._assert_compact_equiv(op, kv, bt)
 
     def test_5d_non_contiguous_blocks(self):
         """Block indices are sparse across a large pool."""
@@ -1628,18 +1653,7 @@ class TestCompactGatherReshape(unittest.TestCase):
         op = self._make_op()
         kv = self._make_kv_cache_2d(16, 4, 16, 128)
         bt = torch.tensor([[0, 0, 1], [0, 2, 2]], dtype=torch.int32)
-        block_indices, compact_bt, k_buf, v_buf = self._make_compact_bufs(
-            bt, 4, 16, 128
-        )
-        k_compact, v_compact = op._gather_and_reshape_kv_compact(
-            kv, block_indices, k_buf, v_buf
-        )
-        k_full, _ = op._reshape_kv_cache_vectorized(kv)
-        orig_indices = bt.reshape(-1).to(torch.int64)
-        torch.testing.assert_close(
-            k_compact[compact_bt.reshape(-1).to(torch.int64)], k_full[orig_indices]
-        )
-        self.assertEqual(k_compact.shape[0], bt.numel() + 1)
+        self._assert_compact_equiv(op, kv, bt)
 
     def test_2d_oversized_stride_truncates_to_prefix(self):
         op = self._make_op()
@@ -1672,7 +1686,7 @@ class TestCompactGatherReshape(unittest.TestCase):
         """When kv_cache is FP8, _forward_paged should use the full reshape path."""
         from types import SimpleNamespace
 
-        op = self._make_op(kv_cache_dtype=KvCacheDataType.FP8)
+        op = self._make_op(kv_cache_dtype=KvCacheDataType.FP8, linear_v=False)
         fp8_dtype = torch.float8_e4m3fn
         kv = torch.randn(16, 2, 4, 16, 128, dtype=torch.float16).to(fp8_dtype)
         q = torch.randn(4, 8, 128, dtype=torch.float16)
@@ -1716,7 +1730,7 @@ class TestCompactGatherReshape(unittest.TestCase):
         ):
             op._forward_paged(q, kv_cache, fmha_params)
 
-        self.assertFalse(op.use_compact)
+        self.assertFalse(op.linear_v)
         self.assertEqual(full_reshape.call_count, 1)
 
     # ---- block table sanitization ------------------------------------------
@@ -2656,80 +2670,6 @@ class TestAiterPrefillImplMropePositionIds(unittest.TestCase):
 
     def test_nonasm_mrope_matches_reference(self):
         self._check_mrope_matches_reference(AiterPrefillImplNonAsm)
-
-
-@unittest.skipUnless(_is_rocm() and _OPS_IMPORTABLE, "Requires ROCm attention wrappers")
-class TestVLayoutContract(unittest.TestCase):
-    def _make_case(self, head_dim: int, page: int):
-        config = _make_attn_configs(8, 2, head_dim, page)
-        config.need_rope_kv_cache = True
-        config.dtype = torch.bfloat16
-        inputs = PyAttentionInputs()
-        inputs.is_prefill = True
-        return config, inputs
-
-    def _decode_flags(self, aiter: bool, asm: bool, triton: bool):
-        flags = FMHAConfig()
-        flags.use_aiter_pa, flags.use_asm_pa, flags.use_triton_pa = aiter, asm, triton
-        return flags
-
-    def test_invalid_geometry(self):
-        for head, page, dtype, error in (
-            (100, 32, KvCacheDataType.BASE, "V geometry"),
-            (128, 8, KvCacheDataType.FP8, "width=16"),
-            (128, 12, KvCacheDataType.BASE, "V geometry"),
-        ):
-            with self.subTest(head=head, page=page, dtype=dtype):
-                config, inputs = self._make_case(head, page)
-                config.kv_cache_dtype = dtype
-                with self.assertRaisesRegex(ValueError, error):
-                    validate_v_layout(config, inputs, FMHAConfig())
-
-    def test_factory_rejects_layout_mismatch(self):
-        config, inputs = self._make_case(256, 16)
-        inputs.is_prefill = False
-        flags = self._decode_flags(aiter=True, asm=True, triton=False)
-        with self.assertRaisesRegex(ValueError, "layout mismatch"):
-            attn_factory.get_fmha_impl(config, None, inputs, fmha_config=flags)
-
-    def test_layout_mismatch_accepted_when_page_equals_width(self):
-        config, inputs = self._make_case(256, 8)
-        inputs.is_prefill = False
-        validate_v_layout(
-            config, inputs, self._decode_flags(aiter=False, asm=True, triton=False)
-        )
-
-    def test_fp8_no_asm_requires_page_equals_width(self):
-        config, inputs = self._make_case(128, 32)
-        config.kv_cache_dtype, inputs.is_prefill = KvCacheDataType.FP8, False
-        flags = self._decode_flags(aiter=True, asm=False, triton=False)
-        with self.assertRaisesRegex(ValueError, "layout mismatch"):
-            validate_v_layout(config, inputs, flags)
-        config.kernel_tokens_per_block = 16
-        validate_v_layout(config, inputs, flags)
-
-    def test_constructor_fallback_is_strict_only_with_layout_validator(self):
-        class BrokenImpl:
-            accepts_fmha_config = False
-            support = support_parallelism_config = staticmethod(lambda *_: True)
-
-            def __init__(self, *_):
-                raise RuntimeError("constructor failed")
-
-        class WorkingImpl(BrokenImpl):
-            def __init__(self, *_):
-                pass
-
-        _, inputs = self._make_case(128, 16)
-        inputs.is_prefill = False
-        with patch.object(attn_factory, "DECODE_MHA_IMPS", [BrokenImpl, WorkingImpl]):
-            with patch.object(attn_factory, "VALIDATE_FMHA_CONFIG", None):
-                with self.assertLogs(level="WARNING"):
-                    impl = attn_factory.get_fmha_impl(AttentionConfigs(), None, inputs)
-                self.assertIsInstance(impl, WorkingImpl)
-            with patch.object(attn_factory, "VALIDATE_FMHA_CONFIG", lambda *_: True):
-                with self.assertRaisesRegex(RuntimeError, "constructor failed"):
-                    attn_factory.get_fmha_impl(AttentionConfigs(), None, inputs)
 
 
 if __name__ == "__main__":

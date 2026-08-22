@@ -58,7 +58,7 @@ void AsyncRunner::rethrowPendingExceptionIfAny(std::unique_lock<std::mutex>& lk)
 
 void AsyncRunner::workerLoop() {
     while (true) {
-        Task task;
+        std::optional<Task> task;
         {
             std::unique_lock<std::mutex> lk(mutex_);
             cv_task_.wait(lk, [this] { return pending_task_.has_value() || shutdown_; });
@@ -70,18 +70,36 @@ void AsyncRunner::workerLoop() {
         }
 
         std::exception_ptr exception;
-        {
-            at::ThreadLocalStateGuard tls_guard(task.tls_state);
+        try {
+            at::ThreadLocalStateGuard tls_guard(task->tls_state);
             // Do not propagate Torch profiler callbacks into this worker: Kineto
             // callbacks are thread-affine and can crash when the main engine thread
             // starts/stops profiling while async bookkeeping still runs ATen ops.
             at::DisableRecordFunctionGuard record_function_guard;
-            cuda_graph::GraphStreamGuard stream_guard(cuda_graph::toGraphStream(stream_));
+            cuda_graph::GraphStreamGuard   stream_guard(cuda_graph::toGraphStream(stream_));
+            task->fn();
+            event_.record(stream_);
+            // Release the callable -- and every tensor it captured -- inside the try.
+            // Tensor destruction is not noexcept: freeing a block goes through the
+            // caching allocator, which reports a sticky device error as a thrown
+            // c10::Error. Destroying the task outside the try would let that escape
+            // the std::thread entry function and abort the process via std::terminate;
+            // here it is reported to the next launch()/sync() like any fn() failure.
+            task.reset();
+        } catch (...) {
+            exception = std::current_exception();
+        }
+
+        // fn() may have thrown before the reset above, so the task can still hold
+        // the captured tensors. Drop them here, keeping the first exception: a
+        // second one thrown while unwinding would terminate the process.
+        if (task.has_value()) {
             try {
-                task.fn();
-                event_.record(stream_);
+                task.reset();
             } catch (...) {
-                exception = std::current_exception();
+                if (!exception) {
+                    exception = std::current_exception();
+                }
             }
         }
 

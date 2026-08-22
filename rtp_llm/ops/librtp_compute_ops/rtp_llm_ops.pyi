@@ -2,14 +2,11 @@
 rtp llm custom ops
 """
 from __future__ import annotations
-
-import typing
-
 import librtp_compute_ops
 import libth_transformer_config
 import torch
 import typing
-__all__: list[str] = ['FlashInferMlaAttnParams', 'GroupTopKOp', 'SelectTopkOp', 'SparseMlaParams', 'XQAAttnOp', 'XQAParams', 'allocate_shared_buffer', 'concat_and_cache_mla', 'cp_gather_and_upconvert_fp8_kv_cache', 'cp_gather_indexer_k_quant_cache', 'cublas_gemm_bf16_bf16_fp32', 'cuda_graph_copy_large2small', 'cuda_graph_copy_small2large', 'cutlass_scaled_fp4_mm', 'debug_kernel', 'dispose_communicator', 'dsv4_top_k_per_row_prefill', 'embedding', 'embedding_bert', 'fast_topk_transform_fused', 'fast_topk_transform_ragged_fused', 'fast_topk_v2', 'fast_topk_v2_variable', 'fill_mla_params', 'fused_add_layernorm', 'fused_add_rmsnorm', 'fused_qk_rmsnorm', 'indexer_k_quant_and_cache', 'init_communicator', 'layernorm', 'mla_k_merge', 'moe_post_reorder', 'moe_pre_reorder', 'moe_topk_softmax', 'open_ipc_handle', 'per_tensor_quant_fp8', 'per_token_group_quant_fp8', 'per_token_group_quant_fp8_v2', 'per_token_group_quant_int8', 'per_token_quant_fp8', 'prepare_sparse_mla_params', 'register_buffer_to_communicator', 'reuse_kv_cache_indexed_batched', 'rmsnorm', 'scaled_fp4_experts_quant', 'scaled_fp4_quant', 'silu_and_mul', 'silu_and_mul_scaled_fp4_experts_quant', 'trt_fp8_quantize_128', 'trt_fp8_quantize_128_inplace', 'userbuffers_recv', 'userbuffers_ring_all_gather', 'userbuffers_send']
+__all__: list[str] = ['FlashInferMlaAttnParams', 'GroupTopKOp', 'SelectTopkOp', 'SparseMlaParams', 'XQAAttnOp', 'XQAParams', 'allocate_shared_buffer', 'concat_and_cache_mla', 'cp_gather_and_upconvert_fp8_kv_cache', 'cp_gather_indexer_k_quant_cache', 'cublas_gemm_bf16_bf16_fp32', 'cuda_graph_copy_large2small', 'cuda_graph_copy_small2large', 'cutlass_scaled_fp4_mm', 'debug_kernel', 'dispose_communicator', 'dsv4_top_k_per_row_prefill', 'embedding', 'embedding_bert', 'fast_topk_transform_fused', 'fast_topk_transform_ragged_fused', 'fast_topk_v2', 'fast_topk_v2_variable', 'fill_mla_params', 'fused_add_layernorm', 'fused_add_rmsnorm', 'fused_qk_rmsnorm', 'indexer_k_quant_and_cache', 'init_communicator', 'layernorm', 'mla_k_merge', 'moe_post_reorder', 'moe_pre_reorder', 'moe_topk_softmax', 'open_ipc_handle', 'per_tensor_quant_fp8', 'per_token_group_quant_fp8', 'per_token_group_quant_fp8_v2', 'per_token_group_quant_int8', 'per_token_quant_fp8', 'prepare_sparse_mla_params', 'register_buffer_to_communicator', 'reuse_kv_cache_indexed_batched', 'rmsnorm', 'scaled_fp4_experts_quant', 'scaled_fp4_quant', 'silu_and_mul', 'silu_and_mul_scaled_fp4_experts_quant', 'trt_fp8_quantize_128', 'trt_fp8_quantize_128_inplace', 'userbuffers_recv', 'userbuffers_ring_all_gather', 'userbuffers_send', 'write_cache_store']
 
 
 class FlashInferMlaAttnParams(librtp_compute_ops.ParamsBase):
@@ -20,13 +17,9 @@ class FlashInferMlaAttnParams(librtp_compute_ops.ParamsBase):
         Fill parameters for attention execution (forbid_realloc=true only when called from prepare_cuda_graph/replay)
         """
     def fill_decode_cuda_graph_params(self, sequence_lengths_plus_1_d: torch.Tensor, kv_cache_block_id_device: torch.Tensor, seq_size_per_block: int) -> None:
-        """
-        Update FlashInfer decode metadata on device during CUDA graph replay
-        """
+        """Update FlashInfer decode metadata on device during CUDA graph replay."""
     def fill_params_mha_device(self, prefix_lengths: torch.Tensor, sequence_lengths: torch.Tensor, input_lengths: torch.Tensor, kv_cache_block_id_device: torch.Tensor, seq_size_per_block: int, forbid_realloc: bool = False) -> None:
-        """
-        Fill MHA attention metadata directly from device-resident inputs.
-        """
+        """Fill MHA attention metadata directly from device-resident inputs."""
     @property
     def batch_indice_d(self) -> torch.Tensor:
         """
@@ -208,7 +201,6 @@ class XQAAttnOp:
         ...
     def update(self, params: XQAParams, attn_inputs: librtp_compute_ops.PyAttentionInputs) -> None:
         ...
-
     def update_kv_cache_offset(self, kv_cache_offset: torch.Tensor, kv_cache_block_id_device: torch.Tensor) -> None:
         ...
 class XQAParams(librtp_compute_ops.ParamsBase):
@@ -397,6 +389,14 @@ def userbuffers_send(tensor: torch.Tensor, handler: int, srcoffset: int, dstoffs
     """
     Send data via user buffers to peer
     """
+def write_cache_store(input_lengths: torch.Tensor, prefix_lengths: torch.Tensor, kv_cache_block_id_host: torch.Tensor, cache_store_member: librtp_compute_ops.PyCacheStoreInputs | None, kv_cache: librtp_compute_ops.KVCache | None) -> None:
+    """
+    WriteCacheStoreOp kernel
+    """
+
+def is_hipgraph_capture_enabled() -> bool: ...
+
+
 class TrtllmArFusionHandle:
     """
     RAII handle for TRT-LLM AllReduce Fusion workspace.
@@ -407,7 +407,12 @@ class TrtllmArFusionHandle:
     def get_data_handle(self) -> torch.Tensor: ...
     def open_barrier_handles(self, handles: list[torch.Tensor]) -> None: ...
     def open_data_handles(self, handles: list[torch.Tensor]) -> None: ...
+    def close_peer_mappings(self) -> None: ...
+    def release_local_exports(self) -> None: ...
     def capture_clear(self) -> None: ...
+    def invalidate_capture(self) -> None: ...
+    def commit_capture(self) -> None: ...
+    def begin_capture_session(self) -> None: ...
     def get_captured_handles(self) -> list[torch.Tensor]: ...
     def get_captured_offsets(self) -> torch.Tensor: ...
     def open_captured_handles(self, handles: list[torch.Tensor], offsets: list[int], ptr_idx: int) -> None: ...
